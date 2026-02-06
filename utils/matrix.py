@@ -67,22 +67,25 @@ def arkit_to_nerfstudio(matrix: np.ndarray) -> np.ndarray:
     ARKit uses:
     - Right-handed coordinate system
     - Y-up
-    - Camera looks along +Z axis
-    - Transform is camera-to-world
-
-    Nerfstudio (OpenGL/NeRF convention) uses:
-    - Right-handed coordinate system
-    - Y-up
     - Camera looks along -Z axis
     - Transform is camera-to-world
 
-    To convert, we only need to flip the camera's Z axis (negate Z column).
-    This makes the camera look along -Z instead of +Z while keeping Y pointing up.
+    Nerfstudio (using OPENCV camera model) uses:
+    - Right-handed coordinate system
+    - Y-down
+    - Camera looks along +Z axis
+    - Transform is camera-to-world
+
+    To convert from ARKit (Y-up, -Z) to OpenCV (Y-down, +Z), we need to
+    rotate 180 degrees around the X axis. This corresponds to negating
+    both the Y and Z axes (columns 1 and 2).
     """
     # Create a copy to avoid modifying the original
     result = matrix.copy()
 
-    # Flip Z axis (3rd column) - this reverses the camera's look direction
+    # Flip Y and Z axes (columns 1 and 2)
+    # This corresponds to a 180-degree rotation around X
+    result[:, 1] = -result[:, 1]
     result[:, 2] = -result[:, 2]
 
     return result
