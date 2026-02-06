@@ -36,7 +36,7 @@ class PipelineConfig:
     """Configuration for the processing pipeline."""
     # Frame extraction
     target_fps: Optional[float] = None
-    target_frame_count: Optional[int] = None
+    target_frame_count: int = 250  # Default: 250 frames for good coverage without OOM
     include_limited_tracking: bool = True
 
     # Training
@@ -332,7 +332,7 @@ def main(
     iterations: int = typer.Option(30000, help="Training iterations"),
     skip_training: bool = typer.Option(False, "--skip-training", help="Skip training stage"),
     target_fps: Optional[float] = typer.Option(None, help="Target FPS for frame extraction"),
-    target_frames: Optional[int] = typer.Option(None, help="Target number of frames"),
+    target_frames: int = typer.Option(250, help="Target number of frames (default: 250, use 0 for no limit)"),
     no_zip: bool = typer.Option(False, "--no-zip", help="Don't create ZIP archive"),
     compression: str = typer.Option("high", help="Compression quality: low, medium, high"),
 ):
@@ -340,12 +340,15 @@ def main(
     Run the complete Reality Engine processing pipeline.
 
     Takes an iOS scan package and produces a web-ready tour package.
+
+    Frame extraction defaults to 250 frames using movement-based selection.
+    For larger spaces, increase --target-frames (e.g., 400-500).
     """
     config = PipelineConfig(
         training_iterations=iterations,
         skip_training=skip_training,
         target_fps=target_fps,
-        target_frame_count=target_frames,
+        target_frame_count=target_frames if target_frames > 0 else None,
         create_zip=not no_zip,
         compression_quality=compression,
     )

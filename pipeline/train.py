@@ -171,10 +171,10 @@ def train_gaussian_splat(
     # Add config arguments
     cmd.extend(config.to_nerfstudio_args())
 
-    # Viewer settings - use 'viewer' to avoid wandb login requirement
+    # Viewer settings - use 'tensorboard' for logging without external service
     if not use_viewer:
         cmd.extend(['--viewer.quit-on-train-completion', 'True'])
-        cmd.extend(['--vis', 'viewer'])
+        cmd.extend(['--vis', 'tensorboard'])
 
     console.print(f"[blue]Starting Gaussian Splat training...[/blue]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")

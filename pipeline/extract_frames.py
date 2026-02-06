@@ -2,10 +2,12 @@
 Frame Extraction Pipeline Stage
 
 Extracts frames from video and matches them to poses by timestamp.
+Smart frame selection based on camera movement for optimal training coverage.
 """
 
 import json
 import subprocess
+import shutil
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -15,6 +17,14 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from tqdm import tqdm
 
 console = Console()
+
+# Default target frame count for training
+# 250 frames works well for most room-sized scans
+# Increase for larger spaces (warehouses, outdoor)
+DEFAULT_TARGET_FRAMES = 250
+
+# Minimum camera movement (meters) between frames as fallback
+DEFAULT_MIN_DISTANCE = 0.05  # 5cm
 
 
 @dataclass
@@ -245,44 +255,103 @@ def filter_by_tracking_quality(
 def downsample_frames(
     frames: List[ExtractedFrame],
     target_count: Optional[int] = None,
-    min_distance: Optional[float] = None
+    min_distance: Optional[float] = None,
+    use_movement_based: bool = True
 ) -> List[ExtractedFrame]:
     """
-    Downsample frames for training.
+    Downsample frames for training using smart selection.
 
-    Can either target a specific frame count or ensure minimum distance
-    between consecutive frames.
+    Selection strategy (in order of priority):
+    1. If target_count specified: select frames with maximum coverage
+    2. If min_distance specified: ensure minimum camera movement between frames
+    3. If use_movement_based: distribute frames based on camera path length
 
     Args:
         frames: List of frames to downsample
-        target_count: Target number of frames (takes priority)
+        target_count: Target number of frames
         min_distance: Minimum distance in meters between frames
+        use_movement_based: Use movement-based selection (better coverage)
 
     Returns:
         Downsampled list of frames
     """
+    if len(frames) == 0:
+        return frames
+
     if target_count and len(frames) <= target_count:
         return frames
 
+    from utils.matrix import row_major_to_matrix
+
+    def extract_position(matrix):
+        """Extract camera position from 4x4 transform matrix."""
+        return np.array(matrix[:3, 3])
+
+    # Calculate positions for all frames
+    positions = []
+    for frame in frames:
+        matrix = row_major_to_matrix(frame.transform_matrix)
+        positions.append(extract_position(matrix))
+    positions = np.array(positions)
+
+    if target_count and use_movement_based:
+        # Movement-based selection: select frames distributed along camera path
+        # Calculate cumulative distance along path
+        distances = [0.0]
+        for i in range(1, len(positions)):
+            dist = np.linalg.norm(positions[i] - positions[i-1])
+            distances.append(distances[-1] + dist)
+
+        total_distance = distances[-1]
+        if total_distance < 0.01:  # Camera didn't move much
+            # Fall back to uniform temporal sampling
+            indices = np.linspace(0, len(frames) - 1, target_count, dtype=int)
+            return [frames[i] for i in indices]
+
+        # Select frames at uniform distances along path
+        target_distances = np.linspace(0, total_distance, target_count)
+        selected_indices = []
+
+        for target_dist in target_distances:
+            # Find frame closest to this distance along path
+            idx = np.argmin(np.abs(np.array(distances) - target_dist))
+            if idx not in selected_indices:
+                selected_indices.append(idx)
+            else:
+                # Find nearest unselected frame
+                for offset in range(1, len(frames)):
+                    for candidate in [idx + offset, idx - offset]:
+                        if 0 <= candidate < len(frames) and candidate not in selected_indices:
+                            selected_indices.append(candidate)
+                            break
+                    else:
+                        continue
+                    break
+
+        selected_indices = sorted(set(selected_indices))
+        console.print(f"[blue]Movement-based selection: {len(selected_indices)} frames "
+                     f"covering {total_distance:.2f}m path[/blue]")
+        return [frames[i] for i in selected_indices]
+
     if target_count:
-        # Uniform sampling
+        # Uniform temporal sampling (fallback)
         indices = np.linspace(0, len(frames) - 1, target_count, dtype=int)
         return [frames[i] for i in indices]
 
     if min_distance:
-        # Distance-based sampling
-        from utils.matrix import row_major_to_matrix, extract_position
-
+        # Distance-based sampling - select frame when camera moves enough
         selected = [frames[0]]
-        last_pos = extract_position(row_major_to_matrix(frames[0].transform_matrix))
+        last_pos = positions[0]
 
-        for frame in frames[1:]:
-            pos = extract_position(row_major_to_matrix(frame.transform_matrix))
-            dist = np.linalg.norm(pos - last_pos)
-
+        for i, frame in enumerate(frames[1:], 1):
+            dist = np.linalg.norm(positions[i] - last_pos)
             if dist >= min_distance:
                 selected.append(frame)
-                last_pos = pos
+                last_pos = positions[i]
+
+        # Always include last frame for full coverage
+        if selected[-1] != frames[-1]:
+            selected.append(frames[-1])
 
         return selected
 
@@ -315,17 +384,50 @@ def save_frame_manifest(
     console.print(f"[green]Saved frame manifest to {output_path}[/green]")
 
 
+def cleanup_unused_frames(
+    frames_dir: Path,
+    keep_frames: List[ExtractedFrame]
+) -> int:
+    """
+    Remove frames that weren't selected to save disk space.
+
+    Args:
+        frames_dir: Directory containing all extracted frames
+        keep_frames: List of frames to keep
+
+    Returns:
+        Number of frames removed
+    """
+    keep_paths = {f.image_path.name for f in keep_frames}
+    all_frames = list(frames_dir.glob("frame_*.jpg")) + list(frames_dir.glob("frame_*.png"))
+
+    removed = 0
+    for frame_path in all_frames:
+        if frame_path.name not in keep_paths:
+            frame_path.unlink()
+            removed += 1
+
+    if removed > 0:
+        console.print(f"[dim]Cleaned up {removed} unused frames[/dim]")
+
+    return removed
+
+
 def extract_frames(
     video_path: Path,
     poses: List[Dict],
     output_dir: Path,
     target_fps: Optional[float] = None,
     include_limited_tracking: bool = True,
-    target_frame_count: Optional[int] = None,
-    min_frame_distance: Optional[float] = None
+    target_frame_count: Optional[int] = DEFAULT_TARGET_FRAMES,
+    min_frame_distance: Optional[float] = None,
+    cleanup_unused: bool = True
 ) -> Tuple[Path, List[ExtractedFrame]]:
     """
-    Full frame extraction pipeline.
+    Full frame extraction pipeline with smart frame selection.
+
+    By default, extracts ~250 frames using movement-based selection
+    to ensure good coverage of the scanned space.
 
     Args:
         video_path: Path to input video
@@ -333,8 +435,10 @@ def extract_frames(
         output_dir: Output directory for frames
         target_fps: Target extraction FPS (None = video native)
         include_limited_tracking: Include limited tracking frames
-        target_frame_count: Target number of output frames
+        target_frame_count: Target number of output frames (default: 250)
+                           Set to None to disable downsampling
         min_frame_distance: Minimum distance between frames (meters)
+        cleanup_unused: Remove non-selected frames to save disk space
 
     Returns:
         Tuple of (frames_directory, list_of_matched_frames)
@@ -369,14 +473,21 @@ def extract_frames(
         include_limited=include_limited_tracking
     )
 
-    # Downsample if requested
+    # Smart downsampling (enabled by default)
+    original_count = len(matched)
     if target_frame_count or min_frame_distance:
         matched = downsample_frames(
             matched,
             target_count=target_frame_count,
-            min_distance=min_frame_distance
+            min_distance=min_frame_distance,
+            use_movement_based=True
         )
-        console.print(f"[blue]Downsampled to {len(matched)} frames[/blue]")
+        console.print(f"[green]Selected {len(matched)}/{original_count} frames "
+                     f"(target: {target_frame_count or 'distance-based'})[/green]")
+
+    # Clean up unused frames to save disk space
+    if cleanup_unused and len(matched) < original_count:
+        cleanup_unused_frames(frames_dir, matched)
 
     # Save manifest
     save_frame_manifest(matched, output_dir / "frames_manifest.json")
@@ -394,7 +505,8 @@ if __name__ == "__main__":
     def main(
         work_dir: Path = typer.Argument(..., help="Work directory (from ingest stage)"),
         fps: Optional[float] = typer.Option(None, help="Target FPS for extraction"),
-        target_frames: Optional[int] = typer.Option(None, help="Target number of frames"),
+        target_frames: int = typer.Option(DEFAULT_TARGET_FRAMES, help="Target number of frames (default: 250)"),
+        no_limit: bool = typer.Option(False, "--no-limit", help="Disable frame limit (extract all)"),
     ):
         """Extract frames from video and match to poses.
 
@@ -428,7 +540,7 @@ if __name__ == "__main__":
                 poses,
                 work_dir / "extracted",
                 target_fps=fps,
-                target_frame_count=target_frames
+                target_frame_count=None if no_limit else target_frames
             )
             console.print(f"\n[bold green]Extraction complete![/bold green]")
             console.print(f"Frames: {frames_dir}")

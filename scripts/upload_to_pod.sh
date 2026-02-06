@@ -40,33 +40,38 @@ fi
 
 echo ""
 echo "🚀 Starting upload server..."
-echo ""
 
 # Start HTTP server in background
 cd "$FILEDIR"
-python3 -m http.server $PORT &
+python3 -m http.server $PORT 2>/dev/null &
 HTTP_PID=$!
 
 # Cleanup on exit
 cleanup() {
     kill $HTTP_PID 2>/dev/null || true
+    kill $TUNNEL_PID 2>/dev/null || true
     echo ""
     echo "🛑 Server stopped"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 # Give server time to start
 sleep 1
 
-# Run cloudflared and capture URL
-echo "🌐 Creating tunnel (this may take a few seconds)..."
+echo "🌐 Creating tunnel..."
 echo ""
 
-# Run cloudflared and parse the URL
-cloudflared tunnel --url http://localhost:$PORT 2>&1 | while read line; do
-    # Look for the tunnel URL
-    if [[ "$line" == *"trycloudflare.com"* ]]; then
-        URL=$(echo "$line" | grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com')
+# Create a temp file for cloudflared output
+TMPFILE=$(mktemp)
+
+# Run cloudflared in background, capture output
+cloudflared tunnel --url http://localhost:$PORT > "$TMPFILE" 2>&1 &
+TUNNEL_PID=$!
+
+# Wait for URL to appear (max 30 seconds)
+for i in {1..30}; do
+    if grep -q "trycloudflare.com" "$TMPFILE" 2>/dev/null; then
+        URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$TMPFILE" | head -1)
         if [ -n "$URL" ]; then
             echo "════════════════════════════════════════════════════════════"
             echo ""
@@ -80,6 +85,21 @@ cloudflared tunnel --url http://localhost:$PORT 2>&1 | while read line; do
             echo ""
             echo "Press Ctrl+C when download is complete"
             echo ""
+            break
         fi
     fi
+    sleep 1
 done
+
+# Check if we got the URL
+if [ -z "$URL" ]; then
+    echo "❌ Failed to get tunnel URL. Cloudflared output:"
+    cat "$TMPFILE"
+    rm "$TMPFILE"
+    exit 1
+fi
+
+rm "$TMPFILE"
+
+# Wait for user to press Ctrl+C
+wait $TUNNEL_PID
