@@ -37,7 +37,7 @@ class PipelineConfig:
     # Frame extraction
     target_fps: Optional[float] = None
     target_frame_count: int = 250  # Default: 250 frames for good coverage without OOM
-    include_limited_tracking: bool = True
+    include_limited_tracking: bool = False  # Exclude "limited" tracking - they have bad poses
 
     # Training
     training_iterations: int = 30000
