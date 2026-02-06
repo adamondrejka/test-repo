@@ -86,13 +86,19 @@ class FloorplanData(BaseModel):
 
 
 class ScanManifest(BaseModel):
-    scan_id: str
+    """Pydantic model for scan manifest validation."""
+    scan_id: str = Field(alias="scan_id")
     timestamp: str
-    scan_type: str = Field(default="INDOOR_HYBRID")
+    scan_type: str = Field(alias="scan_type")
     calibration: CameraCalibration
     assets: AssetPaths
     poses: List[PoseEntry]
     floorplan: Optional[FloorplanData] = None
+    video_start_time: Optional[float] = Field(default=None, alias="video_start_time")
+    
+    model_config = {
+        "populate_by_name": True
+    }
 
     @field_validator('poses')
     @classmethod

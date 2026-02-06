@@ -136,6 +136,7 @@ def run_pipeline(
             target_fps=config.target_fps,
             include_limited_tracking=config.include_limited_tracking,
             target_frame_count=config.target_frame_count,
+            video_start_time=manifest.video_start_time
         )
     except ExtractionError as e:
         console.print(f"[bold red]Frame extraction failed:[/bold red] {e}")
