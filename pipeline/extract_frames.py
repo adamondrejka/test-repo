@@ -26,6 +26,37 @@ DEFAULT_TARGET_FRAMES = 250
 # Minimum camera movement (meters) between frames as fallback
 DEFAULT_MIN_DISTANCE = 0.05  # 5cm
 
+# Threshold for detecting zero/invalid positions (meters)
+ZERO_POSITION_THRESHOLD = 0.001
+
+
+def is_valid_pose(pose: dict) -> bool:
+    """
+    Check if pose has valid position (not at origin).
+
+    ARKit returns [0, 0, 0] position when tracking is lost.
+    These poses corrupt the Gaussian Splat reconstruction.
+
+    Args:
+        pose: Pose dictionary with transform_matrix (16 elements, row-major)
+
+    Returns:
+        True if position is valid (not at origin)
+    """
+    tm = pose.get('transform_matrix', [])
+    if len(tm) != 16:
+        return False
+    # Position is at indices 3, 7, 11 in row-major 4x4 matrix
+    # [r00 r01 r02 tx]   -> indices 0-3
+    # [r10 r11 r12 ty]   -> indices 4-7
+    # [r20 r21 r22 tz]   -> indices 8-11
+    # [0   0   0   1 ]   -> indices 12-15
+    pos = [tm[3], tm[7], tm[11]]
+    # Reject if position is essentially zero (tracking lost)
+    return not (abs(pos[0]) < ZERO_POSITION_THRESHOLD and
+                abs(pos[1]) < ZERO_POSITION_THRESHOLD and
+                abs(pos[2]) < ZERO_POSITION_THRESHOLD)
+
 
 @dataclass
 class ExtractedFrame:
@@ -156,10 +187,14 @@ def match_frames_to_poses(
     poses: List[Dict],
     video_fps: float,
     video_start_time: float = 0.0,
-    max_time_diff: float = 0.1
+    max_time_diff: float = 0.1,
+    include_limited: bool = True
 ) -> List[ExtractedFrame]:
     """
-    Match extracted frames to poses by timestamp.
+    Match extracted frames to poses by timestamp with position validation.
+
+    Rejects poses with zero positions (ARKit tracking lost) during matching
+    to prevent corrupted data from entering the training pipeline.
 
     Args:
         frame_dir: Directory containing extracted frames
@@ -167,6 +202,7 @@ def match_frames_to_poses(
         video_fps: Video frame rate
         video_start_time: Timestamp of first video frame (matches first pose timestamp)
         max_time_diff: Maximum allowed time difference for matching (seconds)
+        include_limited: Include frames with 'limited' tracking state
 
     Returns:
         List of ExtractedFrame objects with matched poses
@@ -188,6 +224,8 @@ def match_frames_to_poses(
 
     matched = []
     unmatched_count = 0
+    zero_position_count = 0
+    limited_tracking_count = 0
 
     console.print(f"[blue]Matching {len(frames)} frames to {len(poses)} poses...[/blue]")
 
@@ -203,6 +241,18 @@ def match_frames_to_poses(
 
         if min_diff <= max_time_diff:
             pose = poses[nearest_idx]
+
+            # Validate pose has non-zero position (tracking was active)
+            if not is_valid_pose(pose):
+                zero_position_count += 1
+                continue
+
+            # Check tracking state
+            tracking_state = pose.get('tracking_state', 'normal')
+            if tracking_state == 'limited' and not include_limited:
+                limited_tracking_count += 1
+                continue
+
             matched.append(ExtractedFrame(
                 frame_index=i,
                 timestamp=frame_timestamp,
@@ -210,7 +260,7 @@ def match_frames_to_poses(
                 pose_index=nearest_idx,
                 pose_timestamp=pose['timestamp'],
                 transform_matrix=pose['transform_matrix'],
-                tracking_state=pose.get('tracking_state', 'normal')
+                tracking_state=tracking_state
             ))
         else:
             unmatched_count += 1
@@ -218,6 +268,10 @@ def match_frames_to_poses(
     console.print(f"[green]Matched {len(matched)} frames[/green]")
     if unmatched_count > 0:
         console.print(f"[yellow]Skipped {unmatched_count} frames (no matching pose)[/yellow]")
+    if zero_position_count > 0:
+        console.print(f"[yellow]Skipped {zero_position_count} frames (zero position - tracking lost)[/yellow]")
+    if limited_tracking_count > 0:
+        console.print(f"[yellow]Skipped {limited_tracking_count} frames (limited tracking)[/yellow]")
 
     return matched
 
@@ -460,16 +514,11 @@ def extract_frames(
         fps=extraction_fps
     )
 
-    # Match to poses
+    # Match to poses (includes position and tracking validation)
     matched = match_frames_to_poses(
         frames_dir,
         poses,
-        video_fps=extraction_fps
-    )
-
-    # Filter by tracking quality
-    matched = filter_by_tracking_quality(
-        matched,
+        video_fps=extraction_fps,
         include_limited=include_limited_tracking
     )
 

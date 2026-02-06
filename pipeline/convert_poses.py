@@ -20,6 +20,29 @@ from utils.matrix import (
 
 console = Console()
 
+# Threshold for detecting zero/invalid positions (meters)
+ZERO_POSITION_THRESHOLD = 0.001
+
+
+def is_zero_position(transform_matrix: list, threshold: float = ZERO_POSITION_THRESHOLD) -> bool:
+    """
+    Check if transform matrix has zero position (tracking lost).
+
+    Args:
+        transform_matrix: 16-element row-major 4x4 matrix
+        threshold: Distance from origin to consider as zero
+
+    Returns:
+        True if position is at origin (invalid)
+    """
+    if len(transform_matrix) != 16:
+        return True
+    # Position is at indices 3, 7, 11 in row-major 4x4 matrix
+    pos = [transform_matrix[3], transform_matrix[7], transform_matrix[11]]
+    return (abs(pos[0]) < threshold and
+            abs(pos[1]) < threshold and
+            abs(pos[2]) < threshold)
+
 
 def get_actual_image_dimensions(frames_dir: Path) -> Optional[Tuple[int, int]]:
     """
@@ -144,10 +167,17 @@ def create_transforms_json(
         "frames": []
     }
 
-    # Convert each frame
+    # Convert each frame with zero-position validation
     console.print(f"[blue]Converting {len(frames)} poses to Nerfstudio format...[/blue]")
 
+    zero_position_count = 0
     for frame_data in frames:
+        # Secondary filter: reject frames with zero positions
+        # This is a safety net in case extraction didn't filter properly
+        if is_zero_position(frame_data['transform_matrix']):
+            zero_position_count += 1
+            continue
+
         try:
             frame = create_nerfstudio_frame(
                 image_path=frame_data['image_path'],
@@ -158,6 +188,9 @@ def create_transforms_json(
         except ConversionError as e:
             console.print(f"[yellow]Warning: {e}[/yellow]")
             continue
+
+    if zero_position_count > 0:
+        console.print(f"[yellow]Filtered {zero_position_count} frames with zero positions[/yellow]")
 
     # Write to file
     with open(output_path, 'w') as f:
