@@ -477,7 +477,8 @@ def extract_frames(
     include_limited_tracking: bool = True,
     target_frame_count: Optional[int] = DEFAULT_TARGET_FRAMES,
     min_frame_distance: Optional[float] = None,
-    cleanup_unused: bool = True
+    cleanup_unused: bool = True,
+    video_start_time: Optional[float] = 0.0
 ) -> Tuple[Path, List[ExtractedFrame]]:
     """
     Full frame extraction pipeline with smart frame selection.
@@ -495,6 +496,7 @@ def extract_frames(
                            Set to None to disable downsampling
         min_frame_distance: Minimum distance between frames (meters)
         cleanup_unused: Remove non-selected frames to save disk space
+        video_start_time: System uptime of the first frame (for synchronization)
 
     Returns:
         Tuple of (frames_directory, list_of_matched_frames)
@@ -516,19 +518,16 @@ def extract_frames(
         fps=extraction_fps
     )
 
-    # Get video start time from manifest for synchronization
-    # If not present, match_frames_to_poses will fallback to first pose time (less accurate)
-    # The manifest stores it as 'video_start_time' at root level, but we passed 'poses' list here.
-    # We need to change the function signature or pass it in.
-    # Actually, looking at the caller, we only pass 'poses'. We should pass the full manifest or the start time.
-    
-    # Wait, I cannot easily change the signature of 'extract_frames' without breaking callers if they exist.
-    # But I am the author. Let's look at 'extract_frames' signature.
-    # def extract_frames(video_path, poses, ...
-    
-    # I will add 'video_start_time' as an optional argument to extract_frames.
-    
-    return frames_dir, matched
+    # Match to poses (includes position and tracking validation)
+    matched = match_frames_to_poses(
+        frames_dir,
+        poses,
+        video_fps=extraction_fps,
+        video_start_time=video_start_time or 0.0,
+        include_limited=include_limited_tracking
+    )
+
+    # Smart downsampling (enabled by default)
     original_count = len(matched)
     if target_frame_count or min_frame_distance:
         matched = downsample_frames(
