@@ -67,19 +67,30 @@ def arkit_to_nerfstudio(matrix: np.ndarray) -> np.ndarray:
     ARKit uses:
     - Right-handed coordinate system
     - Y-up
-    - Camera looks along -Z axis
+    - Camera looks along +Z axis (different from OpenGL!)
+    - Transform is camera-to-world
 
-    Nerfstudio (OpenGL convention) uses:
+    Nerfstudio (OpenGL/NeRF convention) uses:
     - Right-handed coordinate system
     - Y-up
     - Camera looks along -Z axis
+    - Transform is camera-to-world
 
-    Both use the same convention, so no conversion needed!
-    The transform represents camera-to-world.
+    To convert, we need to flip the camera's local Y and Z axes,
+    which rotates the camera 180 degrees around its X axis.
+    This is done by post-multiplying with diag([1, -1, -1, 1]).
     """
-    # Both ARKit and Nerfstudio use OpenGL convention
-    # No coordinate system flip required
-    return matrix.copy()
+    # Conversion matrix: flip Y and Z in camera space
+    # This makes the camera look along -Z instead of +Z
+    conversion = np.array([
+        [1,  0,  0, 0],
+        [0, -1,  0, 0],
+        [0,  0, -1, 0],
+        [0,  0,  0, 1]
+    ], dtype=matrix.dtype)
+
+    # Apply conversion: transform the camera's local axes
+    return matrix @ conversion
 
 
 def compute_camera_intrinsics_dict(
