@@ -1,0 +1,44 @@
+# Reality Engine - Cloud Training Dockerfile
+# Optimized for RunPod/Vast.ai deployment
+
+FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    git \
+    wget \
+    unzip \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    nerfstudio \
+    gsplat \
+    numpy \
+    opencv-python \
+    Pillow \
+    trimesh \
+    scipy \
+    tqdm \
+    typer \
+    rich \
+    pydantic
+
+# Set up workspace
+WORKDIR /workspace
+
+# Copy backend code
+COPY . /workspace/backend/
+RUN pip install -e /workspace/backend/
+
+# Create data directories
+RUN mkdir -p /data/input /data/output
+
+# Default command
+CMD ["bash"]
