@@ -21,7 +21,9 @@ from utils.matrix import (
 console = Console()
 
 # Threshold for detecting zero/invalid positions (meters)
-ZERO_POSITION_THRESHOLD = 0.001
+# ARKit returns near-zero positions when tracking is unstable
+# 5cm threshold catches all "origin cluster" poses
+ZERO_POSITION_THRESHOLD = 0.05
 
 
 def is_zero_position(transform_matrix: list, threshold: float = ZERO_POSITION_THRESHOLD) -> bool:

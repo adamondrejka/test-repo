@@ -27,7 +27,9 @@ DEFAULT_TARGET_FRAMES = 250
 DEFAULT_MIN_DISTANCE = 0.05  # 5cm
 
 # Threshold for detecting zero/invalid positions (meters)
-ZERO_POSITION_THRESHOLD = 0.001
+# ARKit returns near-zero positions when tracking is unstable
+# 5cm threshold catches all "origin cluster" poses
+ZERO_POSITION_THRESHOLD = 0.05
 
 
 def is_valid_pose(pose: dict) -> bool:
