@@ -63,7 +63,8 @@ def create_metadata(
     scan_id: str,
     scan_manifest: Dict,
     processing_stats: Dict,
-    output_path: Path
+    output_path: Path,
+    splat_filename: str = "scene.ply"
 ) -> Path:
     """
     Create metadata.json for the tour package.
@@ -91,7 +92,7 @@ def create_metadata(
             "frame_count": len(scan_manifest.get("poses", [])),
         },
         "assets": {
-            "splat": "scene.spz",
+            "splat": splat_filename,
             "collision": "collision.glb",
             "floorplan": "floorplan.svg",
             "thumbnail": "thumbnail.jpg",
@@ -180,12 +181,14 @@ def create_tour_package(
 
     console.print(f"[blue]Creating tour package: {package_dir}[/blue]")
 
-    # Copy splat file
+    # Copy splat file (supports both .ply and .spz)
     if not splat_path.exists():
         raise PackageError(f"Splat file not found: {splat_path}")
 
-    shutil.copy(splat_path, package_dir / "scene.spz")
-    console.print("  Copied scene.spz")
+    splat_ext = splat_path.suffix.lower()
+    splat_output_name = f"scene{splat_ext}"
+    shutil.copy(splat_path, package_dir / splat_output_name)
+    console.print(f"  Copied {splat_output_name}")
 
     # Copy collision mesh if available
     if collision_path and collision_path.exists():
@@ -208,7 +211,8 @@ def create_tour_package(
         scan_id,
         scan_manifest,
         processing_stats or {},
-        package_dir / "metadata.json"
+        package_dir / "metadata.json",
+        splat_filename=splat_output_name
     )
 
     # Calculate total package size
@@ -266,12 +270,13 @@ def validate_package(package_dir: Path) -> List[str]:
     """
     errors = []
 
-    required_files = ['scene.spz', 'metadata.json']
-    optional_files = ['collision.glb', 'floorplan.svg', 'thumbnail.jpg']
+    # Check for splat file (either .ply or .spz)
+    has_splat = (package_dir / "scene.ply").exists() or (package_dir / "scene.spz").exists()
+    if not has_splat:
+        errors.append("Missing splat file (scene.ply or scene.spz)")
 
-    for filename in required_files:
-        if not (package_dir / filename).exists():
-            errors.append(f"Missing required file: {filename}")
+    if not (package_dir / "metadata.json").exists():
+        errors.append("Missing required file: metadata.json")
 
     # Validate metadata
     metadata_path = package_dir / "metadata.json"

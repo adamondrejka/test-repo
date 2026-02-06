@@ -209,26 +209,24 @@ def run_pipeline(
         if ply_path is None:
             console.print("[yellow]No Gaussian splat PLY found, skipping compression[/yellow]")
 
-    # Stage 5: Compress
-    console.print("\n[bold]Stage 5: Compress to SPZ[/bold]")
+    # Stage 5: Prepare Splat File
+    # Note: SPZ compression requires Niantic's spz tool. For now, use PLY directly.
+    # Most viewers (SuperSplat, etc.) support PLY format natively.
+    console.print("\n[bold]Stage 5: Prepare Splat File[/bold]")
     stage_start = time.time()
     if config.skip_training and ply_path is None:
-        # Create dummy SPZ for testing
-        console.print("[yellow]Creating dummy SPZ for local testing[/yellow]")
-        spz_path = work_dir / "scene.spz"
-        spz_path.write_text('{"version":1,"format":"dummy","point_count":0}')
+        # Create dummy PLY for testing
+        console.print("[yellow]Creating dummy PLY for local testing[/yellow]")
+        splat_path = work_dir / "scene.ply"
+        splat_path.write_text('ply\nformat ascii 1.0\nelement vertex 0\nend_header\n')
         compression_stats = {'compression_ratio': 1, 'note': 'dummy for testing'}
     else:
-        try:
-            spz_path, compression_stats = compress_ply_to_spz(
-                ply_path,
-                work_dir / "scene.spz",
-                quality=config.compression_quality
-            )
-        except CompressionError as e:
-            console.print(f"[bold red]Compression failed:[/bold red] {e}")
-            raise
-    stats.record_stage("compress", time.time() - stage_start,
+        # Use PLY directly (no compression)
+        splat_path = ply_path
+        ply_size = ply_path.stat().st_size / (1024 * 1024)
+        console.print(f"[green]Using PLY directly: {ply_path.name} ({ply_size:.1f} MB)[/green]")
+        compression_stats = {'compression_ratio': 1, 'format': 'ply', 'size_mb': ply_size}
+    stats.record_stage("prepare_splat", time.time() - stage_start,
                       compression_ratio=compression_stats.get('compression_ratio', 1))
 
     # Stage 6: Generate Collision Mesh
@@ -295,7 +293,7 @@ def run_pipeline(
         package_path = create_tour_package(
             scan_id=scan_id,
             scan_manifest=json.loads(manifest.model_dump_json()),
-            splat_path=spz_path,
+            splat_path=splat_path,
             collision_path=collision_path,
             floorplan_path=floorplan_path,
             frames_dir=frames_dir,
