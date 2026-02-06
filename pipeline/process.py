@@ -171,7 +171,10 @@ def run_pipeline(
             # Copy transforms and link frames
             import shutil
             shutil.copy(transforms_path, train_data_dir / "transforms.json")
-            (train_data_dir / "frames").symlink_to(frames_dir.resolve())
+            frames_link = train_data_dir / "frames"
+            if frames_link.exists() or frames_link.is_symlink():
+                frames_link.unlink() if frames_link.is_symlink() else shutil.rmtree(frames_link)
+            frames_link.symlink_to(frames_dir.resolve())
 
             training_config = TrainingConfig(
                 max_iterations=config.training_iterations

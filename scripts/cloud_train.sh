@@ -45,7 +45,7 @@ echo ""
 echo "Starting processing pipeline..."
 echo ""
 
-python -m pipeline.process "$SCAN_FILE" \
+python -m pipeline.process main "$SCAN_FILE" \
     --output-dir "$OUTPUT_DIR" \
     --iterations "$ITERATIONS"
 

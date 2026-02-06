@@ -1,10 +1,14 @@
 # Reality Engine - Cloud Training Dockerfile
 # Optimized for RunPod/Vast.ai deployment
+#
+# NOTE: RunPod mounts a volume at /workspace which overwrites container contents.
+# We install to /app instead, and the entrypoint script copies to /workspace if needed.
 
 FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV PATH="/app/backend/scripts:${PATH}"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,10 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
+# Pin numpy to avoid compatibility issues with PyTorch
 RUN pip install --no-cache-dir \
+    numpy==1.24.3 \
     nerfstudio \
     gsplat \
-    numpy \
     opencv-python \
     Pillow \
     trimesh \
@@ -30,15 +35,23 @@ RUN pip install --no-cache-dir \
     rich \
     pydantic
 
-# Set up workspace
-WORKDIR /workspace
+# Copy backend code to /app (not /workspace - RunPod overwrites that)
+WORKDIR /app
+COPY . /app/backend/
+RUN pip install -e /app/backend/
 
-# Copy backend code
-COPY . /workspace/backend/
-RUN pip install -e /workspace/backend/
+# Create entrypoint script that sets up workspace
+RUN echo '#!/bin/bash\n\
+# Copy backend to workspace if not exists\n\
+if [ ! -d "/workspace/backend" ]; then\n\
+    cp -r /app/backend /workspace/backend\n\
+    echo "Copied backend to /workspace/backend"\n\
+fi\n\
+cd /workspace\n\
+exec "$@"' > /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Create data directories
 RUN mkdir -p /data/input /data/output
 
-# Default command
-CMD ["bash"]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["sleep", "infinity"]

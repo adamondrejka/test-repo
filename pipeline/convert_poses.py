@@ -6,9 +6,10 @@ Converts ARKit camera poses to Nerfstudio transforms.json format.
 
 import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import numpy as np
 from rich.console import Console
+from PIL import Image
 
 from utils.matrix import (
     row_major_to_matrix,
@@ -18,6 +19,20 @@ from utils.matrix import (
 )
 
 console = Console()
+
+
+def get_actual_image_dimensions(frames_dir: Path) -> Optional[Tuple[int, int]]:
+    """
+    Get actual image dimensions from first frame.
+
+    Returns:
+        Tuple of (width, height) or None if no frames found
+    """
+    frames = sorted(frames_dir.glob("*.jpg")) + sorted(frames_dir.glob("*.png"))
+    if frames:
+        with Image.open(frames[0]) as img:
+            return img.size  # (width, height)
+    return None
 
 
 class ConversionError(Exception):
@@ -66,6 +81,7 @@ def create_transforms_json(
     frames: List[Dict],
     calibration: Dict,
     output_path: Path,
+    frames_dir: Optional[Path] = None,
     aabb_scale: int = 16,
     camera_model: str = "OPENCV"
 ) -> Dict:
@@ -76,6 +92,7 @@ def create_transforms_json(
         frames: List of frame dictionaries with image_path and transform_matrix
         calibration: Camera calibration dict with intrinsic_matrix, image_width, image_height
         output_path: Path to write transforms.json
+        frames_dir: Optional directory containing frames (for dimension auto-detection)
         aabb_scale: Axis-aligned bounding box scale
         camera_model: Camera model (OPENCV, PINHOLE, etc.)
 
@@ -88,6 +105,31 @@ def create_transforms_json(
         calibration['image_width'],
         calibration['image_height']
     )
+
+    # Auto-detect actual image dimensions from frames if available
+    # This fixes portrait/landscape orientation mismatches
+    if frames_dir:
+        actual_dims = get_actual_image_dimensions(frames_dir)
+        if actual_dims:
+            actual_w, actual_h = actual_dims
+            meta_w, meta_h = intrinsics['w'], intrinsics['h']
+
+            # Check if dimensions are swapped (portrait vs landscape)
+            if (actual_w, actual_h) != (meta_w, meta_h):
+                if (actual_w, actual_h) == (meta_h, meta_w):
+                    # Dimensions are swapped - adjust intrinsics
+                    console.print(f"[yellow]Detected dimension swap: metadata {meta_w}x{meta_h} vs actual {actual_w}x{actual_h}[/yellow]")
+                    console.print(f"[yellow]Adjusting intrinsics for actual image orientation[/yellow]")
+                    intrinsics['w'] = actual_w
+                    intrinsics['h'] = actual_h
+                    # Swap cx/cy to match new orientation
+                    intrinsics['cx'], intrinsics['cy'] = intrinsics['cy'], intrinsics['cx']
+                    intrinsics['fl_x'], intrinsics['fl_y'] = intrinsics['fl_y'], intrinsics['fl_x']
+                else:
+                    console.print(f"[yellow]Warning: Image dimensions mismatch - metadata {meta_w}x{meta_h} vs actual {actual_w}x{actual_h}[/yellow]")
+                    # Use actual dimensions
+                    intrinsics['w'] = actual_w
+                    intrinsics['h'] = actual_h
 
     # Create transforms structure
     transforms = {
@@ -182,7 +224,7 @@ def convert_from_manifest(
                 'timestamp': pose.get('timestamp'),
             })
 
-    return create_transforms_json(frames, calibration, output_path)
+    return create_transforms_json(frames, calibration, output_path, frames_dir=frames_dir)
 
 
 def compute_scene_bounds(transforms: Dict) -> Dict:

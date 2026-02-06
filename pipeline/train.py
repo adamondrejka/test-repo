@@ -38,12 +38,9 @@ class TrainingConfig:
 
     def to_nerfstudio_args(self) -> List[str]:
         """Convert to nerfstudio CLI arguments."""
+        # Note: nerfstudio uses top-level --max-num-iterations, not --pipeline.model.*
         return [
-            f"--pipeline.model.max-num-iterations={self.max_iterations}",
-            f"--pipeline.model.warmup-length={self.warmup_iterations}",
-            f"--pipeline.model.densify-until-iter={self.densify_until}",
-            f"--pipeline.model.densification-interval={self.densify_interval}",
-            f"--pipeline.model.densify-grad-thresh={self.densify_grad_thresh}",
+            f"--max-num-iterations={self.max_iterations}",
         ]
 
 
@@ -174,10 +171,10 @@ def train_gaussian_splat(
     # Add config arguments
     cmd.extend(config.to_nerfstudio_args())
 
-    # Viewer settings
+    # Viewer settings - use 'viewer' to avoid wandb login requirement
     if not use_viewer:
         cmd.extend(['--viewer.quit-on-train-completion', 'True'])
-        cmd.extend(['--vis', 'wandb'])  # or 'tensorboard' or 'viewer'
+        cmd.extend(['--vis', 'viewer'])
 
     console.print(f"[blue]Starting Gaussian Splat training...[/blue]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
