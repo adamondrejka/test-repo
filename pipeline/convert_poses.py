@@ -68,7 +68,9 @@ class ConversionError(Exception):
 def create_nerfstudio_frame(
     image_path: str,
     transform_matrix: List[float],
-    timestamp: Optional[float] = None
+    timestamp: Optional[float] = None,
+    rotate_180: bool = False,
+    transpose: Optional[int] = None
 ) -> Dict:
     """
     Create a single frame entry for Nerfstudio transforms.json.
@@ -77,6 +79,8 @@ def create_nerfstudio_frame(
         image_path: Relative path to image file
         transform_matrix: 4x4 transform matrix (row-major, 16 elements)
         timestamp: Optional timestamp for the frame
+        rotate_180: If True, rotate camera 180 degrees around Z axis
+        transpose: Optional FFmpeg transpose value (1=CW, 2=CCW)
 
     Returns:
         Dictionary in Nerfstudio frame format
@@ -90,6 +94,29 @@ def create_nerfstudio_frame(
 
     # Convert to Nerfstudio convention
     ns_matrix = arkit_to_nerfstudio(matrix)
+
+    if rotate_180:
+        # Rotate 180 degrees around Z axis (negate X and Y)
+        ns_matrix[:2, :3] *= -1
+
+    if transpose == 2:
+        # Image rotated 90 CCW -> rotate camera 90 CW around Z
+        R_z_cw = np.array([
+            [0, 1, 0, 0],
+            [-1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+        ns_matrix = ns_matrix @ R_z_cw
+    elif transpose == 1:
+        # Image rotated 90 CW -> rotate camera 90 CCW around Z
+        R_z_ccw = np.array([
+            [0, -1, 0, 0],
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+        ns_matrix = ns_matrix @ R_z_ccw
 
     frame = {
         "file_path": image_path,
@@ -108,7 +135,9 @@ def create_transforms_json(
     output_path: Path,
     frames_dir: Optional[Path] = None,
     aabb_scale: int = 16,
-    camera_model: str = "OPENCV"
+    camera_model: str = "OPENCV",
+    rotate_180: bool = False,
+    transpose: Optional[int] = None
 ) -> Dict:
     """
     Create Nerfstudio-compatible transforms.json.
@@ -120,6 +149,8 @@ def create_transforms_json(
         frames_dir: Optional directory containing frames (for dimension auto-detection)
         aabb_scale: Axis-aligned bounding box scale
         camera_model: Camera model (OPENCV, PINHOLE, etc.)
+        rotate_180: If True, rotate cameras 180 degrees
+        transpose: Optional FFmpeg transpose value (1=CW, 2=CCW)
 
     Returns:
         The complete transforms dictionary
@@ -130,31 +161,37 @@ def create_transforms_json(
         calibration['image_width'],
         calibration['image_height']
     )
+    
+    # Apply transposition to intrinsics if needed
+    if transpose == 2: # 90 CCW
+        orig_w, orig_h = intrinsics['w'], intrinsics['h']
+        orig_fx, orig_fy = intrinsics['fl_x'], intrinsics['fl_y']
+        orig_cx, orig_cy = intrinsics['cx'], intrinsics['cy']
+        
+        intrinsics['w'], intrinsics['h'] = orig_h, orig_w
+        intrinsics['fl_x'], intrinsics['fl_y'] = orig_fy, orig_fx
+        intrinsics['cx'] = orig_cy
+        intrinsics['cy'] = orig_w - orig_cx
+        console.print(f"[yellow]Adjusted intrinsics for 90deg CCW transpose[/yellow]")
+    elif transpose == 1: # 90 CW
+        orig_w, orig_h = intrinsics['w'], intrinsics['h']
+        orig_fx, orig_fy = intrinsics['fl_x'], intrinsics['fl_y']
+        orig_cx, orig_cy = intrinsics['cx'], intrinsics['cy']
+        
+        intrinsics['w'], intrinsics['h'] = orig_h, orig_w
+        intrinsics['fl_x'], intrinsics['fl_y'] = orig_fy, orig_fx
+        intrinsics['cx'] = orig_h - orig_cy
+        intrinsics['cy'] = orig_cx
+        console.print(f"[yellow]Adjusted intrinsics for 90deg CW transpose[/yellow]")
 
     # Auto-detect actual image dimensions from frames if available
-    # This fixes portrait/landscape orientation mismatches
     if frames_dir:
         actual_dims = get_actual_image_dimensions(frames_dir)
         if actual_dims:
             actual_w, actual_h = actual_dims
-            meta_w, meta_h = intrinsics['w'], intrinsics['h']
-
-            # Check if dimensions are swapped (portrait vs landscape)
-            if (actual_w, actual_h) != (meta_w, meta_h):
-                if (actual_w, actual_h) == (meta_h, meta_w):
-                    # Dimensions are swapped - adjust intrinsics
-                    console.print(f"[yellow]Detected dimension swap: metadata {meta_w}x{meta_h} vs actual {actual_w}x{actual_h}[/yellow]")
-                    console.print(f"[yellow]Adjusting intrinsics for actual image orientation[/yellow]")
-                    intrinsics['w'] = actual_w
-                    intrinsics['h'] = actual_h
-                    # Swap cx/cy to match new orientation
-                    intrinsics['cx'], intrinsics['cy'] = intrinsics['cy'], intrinsics['cx']
-                    intrinsics['fl_x'], intrinsics['fl_y'] = intrinsics['fl_y'], intrinsics['fl_x']
-                else:
-                    console.print(f"[yellow]Warning: Image dimensions mismatch - metadata {meta_w}x{meta_h} vs actual {actual_w}x{actual_h}[/yellow]")
-                    # Use actual dimensions
-                    intrinsics['w'] = actual_w
-                    intrinsics['h'] = actual_h
+            # Use actual dimensions from files as source of truth
+            intrinsics['w'] = actual_w
+            intrinsics['h'] = actual_h
 
     # Create transforms structure
     transforms = {
@@ -169,13 +206,13 @@ def create_transforms_json(
         "frames": []
     }
 
-    # Convert each frame with zero-position validation
+    # Convert each frame
     console.print(f"[blue]Converting {len(frames)} poses to Nerfstudio format...[/blue]")
+    if rotate_180:
+        console.print(f"[yellow]Applying 180-degree rotation fix[/yellow]")
 
     zero_position_count = 0
     for frame_data in frames:
-        # Secondary filter: reject frames with zero positions
-        # This is a safety net in case extraction didn't filter properly
         if is_zero_position(frame_data['transform_matrix']):
             zero_position_count += 1
             continue
@@ -184,7 +221,9 @@ def create_transforms_json(
             frame = create_nerfstudio_frame(
                 image_path=frame_data['image_path'],
                 transform_matrix=frame_data['transform_matrix'],
-                timestamp=frame_data.get('timestamp')
+                timestamp=frame_data.get('timestamp'),
+                rotate_180=rotate_180,
+                transpose=transpose
             )
             transforms['frames'].append(frame)
         except ConversionError as e:
@@ -207,7 +246,9 @@ def convert_from_manifest(
     manifest_path: Path,
     frames_dir: Path,
     output_path: Path,
-    frames_manifest_path: Optional[Path] = None
+    frames_manifest_path: Optional[Path] = None,
+    rotate_180: bool = False,
+    transpose: Optional[int] = None
 ) -> Dict:
     """
     Convert poses from iOS scan manifest to Nerfstudio format.
@@ -218,6 +259,8 @@ def convert_from_manifest(
         output_path: Path to write transforms.json
         frames_manifest_path: Optional path to frames_manifest.json
             (if provided, uses frame-pose matching from extraction)
+        rotate_180: If True, rotate cameras 180 degrees
+        transpose: Optional FFmpeg transpose value (1=CW, 2=CCW)
 
     Returns:
         The complete transforms dictionary
@@ -259,7 +302,14 @@ def convert_from_manifest(
                 'timestamp': pose.get('timestamp'),
             })
 
-    return create_transforms_json(frames, calibration, output_path, frames_dir=frames_dir)
+    return create_transforms_json(
+        frames, 
+        calibration, 
+        output_path, 
+        frames_dir=frames_dir, 
+        rotate_180=rotate_180,
+        transpose=transpose
+    )
 
 
 def compute_scene_bounds(transforms: Dict) -> Dict:

@@ -30,7 +30,8 @@ class CameraCalibration(BaseModel):
 
 
 class AssetPaths(BaseModel):
-    video_path: str
+    video_path: Optional[str] = None
+    images_dir: Optional[str] = None
     room_geometry: Optional[str] = None
     mesh_path: Optional[str] = None
 
@@ -39,6 +40,7 @@ class PoseEntry(BaseModel):
     timestamp: float = Field(..., ge=0)
     transform_matrix: List[float] = Field(..., min_length=16, max_length=16)
     tracking_state: str = Field(default="normal")
+    image_name: Optional[str] = None
 
     @field_validator('transform_matrix')
     @classmethod
@@ -299,11 +301,30 @@ def validate_scan_package(package_dir: Path) -> Tuple[bool, Dict, List[str]]:
 
     info['manifest'] = manifest
 
-    # Check video
-    video_path = package_dir / manifest.assets.video_path
-    video_valid, video_info, video_errors = validate_video_file(video_path)
-    errors.extend(video_errors)
-    info['video'] = video_info
+    # Check for images directory or video (at least one required)
+    has_images = False
+    has_video = False
+
+    if manifest.assets.images_dir:
+        images_dir = package_dir / manifest.assets.images_dir
+        if images_dir.exists() and images_dir.is_dir():
+            image_files = list(images_dir.glob("frame_*.jpg"))
+            if len(image_files) > 0:
+                has_images = True
+                info['images'] = {'count': len(image_files), 'dir': str(images_dir)}
+            else:
+                errors.append(f"Images directory exists but contains no frame_*.jpg files")
+
+    if manifest.assets.video_path:
+        video_path = package_dir / manifest.assets.video_path
+        video_valid, video_info, video_errors = validate_video_file(video_path)
+        if video_valid:
+            has_video = True
+        errors.extend(video_errors)
+        info['video'] = video_info
+
+    if not has_images and not has_video:
+        errors.append("Scan package must contain either an images directory or a video file")
 
     # Check room geometry (optional - just a warning, not an error)
     if manifest.assets.room_geometry:

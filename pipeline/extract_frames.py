@@ -135,7 +135,8 @@ def extract_frames_ffmpeg(
     output_dir: Path,
     fps: Optional[float] = None,
     quality: int = 2,
-    start_number: int = 0
+    start_number: int = 0,
+    transpose: Optional[int] = None
 ) -> int:
     """
     Extract frames from video using FFmpeg.
@@ -146,6 +147,7 @@ def extract_frames_ffmpeg(
         fps: Output frame rate (None = use video fps)
         quality: JPEG quality (2=best, 31=worst)
         start_number: Starting frame number
+        transpose: FFmpeg transpose filter value (1=CW, 2=CCW)
 
     Returns:
         Number of frames extracted
@@ -154,10 +156,16 @@ def extract_frames_ffmpeg(
 
     output_pattern = str(output_dir / "frame_%06d.jpg")
 
-    cmd = ['ffmpeg', '-y', '-i', str(video_path)]
-
+    cmd = ['ffmpeg', '-y', '-noautorotate', '-i', str(video_path)]
+    
+    filters = []
     if fps:
-        cmd.extend(['-vf', f'fps={fps}'])
+        filters.append(f'fps={fps}')
+    if transpose is not None:
+        filters.append(f'transpose={transpose}')
+
+    if filters:
+        cmd.extend(['-vf', ','.join(filters)])
 
     cmd.extend([
         '-qscale:v', str(quality),
@@ -469,6 +477,97 @@ def cleanup_unused_frames(
     return removed
 
 
+def load_captured_images(
+    images_dir: Path,
+    poses: List[Dict],
+    output_dir: Path,
+    target_frame_count: Optional[int] = DEFAULT_TARGET_FRAMES,
+) -> Tuple[Path, List[ExtractedFrame]]:
+    """
+    Load pre-captured JPEG images with 1:1 pose mapping.
+
+    Each image corresponds to a pose by index (frame_000000.jpg -> poses[0]).
+    Reuses the existing downsample_frames() for movement-based selection.
+
+    Args:
+        images_dir: Directory containing frame_*.jpg images
+        poses: List of pose dictionaries from manifest
+        output_dir: Output directory for selected frames
+        target_frame_count: Target number of frames for downsampling
+
+    Returns:
+        Tuple of (frames_directory, list_of_selected_frames)
+    """
+    # 1. List images sorted by name (matches pose order by index)
+    image_files = sorted(images_dir.glob("frame_*.jpg"))
+
+    if not image_files:
+        raise ExtractionError(f"No frame_*.jpg files found in {images_dir}")
+
+    console.print(f"[blue]Found {len(image_files)} pre-captured images[/blue]")
+
+    if len(image_files) != len(poses):
+        console.print(f"[yellow]Warning: {len(image_files)} images vs {len(poses)} poses "
+                     f"(using minimum)[/yellow]")
+
+    # 2. Build ExtractedFrame list (1:1 with poses, by index)
+    frames = []
+    num_pairs = min(len(image_files), len(poses))
+    zero_position_count = 0
+
+    for i in range(num_pairs):
+        pose = poses[i]
+
+        if not is_valid_pose(pose):
+            zero_position_count += 1
+            continue
+
+        tracking_state = pose.get('tracking_state', 'normal')
+
+        frames.append(ExtractedFrame(
+            frame_index=i,
+            timestamp=pose['timestamp'],
+            image_path=image_files[i],
+            pose_index=i,
+            pose_timestamp=pose['timestamp'],
+            transform_matrix=pose['transform_matrix'],
+            tracking_state=tracking_state,
+        ))
+
+    if zero_position_count > 0:
+        console.print(f"[yellow]Skipped {zero_position_count} frames "
+                     f"(zero position - tracking lost)[/yellow]")
+
+    console.print(f"[green]Matched {len(frames)} frames with valid poses[/green]")
+
+    # 3. Copy images to output dir
+    frames_dir = output_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    for f in frames:
+        dest = frames_dir / f.image_path.name
+        if not dest.exists():
+            shutil.copy2(f.image_path, dest)
+        # Update image_path to point to copied location
+        f.image_path = dest
+
+    # 4. Downsample using existing movement-based algorithm
+    original_count = len(frames)
+    if target_frame_count and len(frames) > target_frame_count:
+        frames = downsample_frames(frames, target_count=target_frame_count)
+        console.print(f"[green]Selected {len(frames)}/{original_count} frames "
+                     f"(target: {target_frame_count})[/green]")
+
+    # 5. Cleanup non-selected frames
+    if len(frames) < original_count:
+        cleanup_unused_frames(frames_dir, frames)
+
+    # 6. Write frames_manifest.json
+    save_frame_manifest(frames, output_dir / "frames_manifest.json")
+
+    return frames_dir, frames
+
+
 def extract_frames(
     video_path: Path,
     poses: List[Dict],
@@ -478,7 +577,8 @@ def extract_frames(
     target_frame_count: Optional[int] = DEFAULT_TARGET_FRAMES,
     min_frame_distance: Optional[float] = None,
     cleanup_unused: bool = True,
-    video_start_time: Optional[float] = 0.0
+    video_start_time: Optional[float] = 0.0,
+    transpose: Optional[int] = None
 ) -> Tuple[Path, List[ExtractedFrame]]:
     """
     Full frame extraction pipeline with smart frame selection.
@@ -497,6 +597,7 @@ def extract_frames(
         min_frame_distance: Minimum distance between frames (meters)
         cleanup_unused: Remove non-selected frames to save disk space
         video_start_time: System uptime of the first frame (for synchronization)
+        transpose: FFmpeg transpose filter value (1=90CW, 2=90CCW)
 
     Returns:
         Tuple of (frames_directory, list_of_matched_frames)
@@ -515,7 +616,8 @@ def extract_frames(
     num_frames = extract_frames_ffmpeg(
         video_path,
         frames_dir,
-        fps=extraction_fps
+        fps=extraction_fps,
+        transpose=transpose
     )
 
     # Match to poses (includes position and tracking validation)
@@ -561,6 +663,7 @@ if __name__ == "__main__":
         fps: Optional[float] = typer.Option(None, help="Target FPS for extraction"),
         target_frames: int = typer.Option(DEFAULT_TARGET_FRAMES, help="Target number of frames (default: 250)"),
         no_limit: bool = typer.Option(False, "--no-limit", help="Disable frame limit (extract all)"),
+        transpose: Optional[int] = typer.Option(None, help="FFmpeg transpose: 1=90CW, 2=90CCW"),
     ):
         """Extract frames from video and match to poses.
 
@@ -596,7 +699,8 @@ if __name__ == "__main__":
                 work_dir / "extracted",
                 target_fps=fps,
                 target_frame_count=None if no_limit else target_frames,
-                video_start_time=video_start_time
+                video_start_time=video_start_time,
+                transpose=transpose
             )
             console.print(f"\n[bold green]Extraction complete![/bold green]")
             console.print(f"Frames: {frames_dir}")

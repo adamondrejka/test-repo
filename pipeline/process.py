@@ -15,7 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 import typer
 
 from .ingest import ingest, IngestError
-from .extract_frames import extract_frames, ExtractionError
+from .extract_frames import extract_frames, load_captured_images, ExtractionError
 from .convert_poses import convert_from_manifest, ConversionError
 from .train import train_and_export, TrainingConfig, TrainingError
 from .compress import compress_ply_to_spz, CompressionError
@@ -49,6 +49,10 @@ class PipelineConfig:
     # Collision
     simplify_collision: bool = True
     collision_target_faces: int = 10000
+
+    # Corrections
+    rotate_180: bool = False
+    transpose: Optional[int] = None
 
     # Output
     create_zip: bool = True
@@ -124,20 +128,37 @@ def run_pipeline(
                       scan_id=manifest.scan_id if manifest else None,
                       pose_count=len(manifest.poses) if manifest else 0)
 
-    # Stage 2: Extract Frames
-    console.print("\n[bold]Stage 2: Extract Frames[/bold]")
+    # Stage 2: Get Frames
+    console.print("\n[bold]Stage 2: Get Frames[/bold]")
     stage_start = time.time()
     try:
-        video_path = package_dir / manifest.assets.video_path
-        frames_dir, matched_frames = extract_frames(
-            video_path=video_path,
-            poses=[p.model_dump() for p in manifest.poses],
-            output_dir=work_dir / "extracted",
-            target_fps=config.target_fps,
-            include_limited_tracking=config.include_limited_tracking,
-            target_frame_count=config.target_frame_count,
-            video_start_time=manifest.video_start_time
-        )
+        # Check for pre-captured images first
+        images_dir = package_dir / (manifest.assets.images_dir or "images")
+
+        if images_dir.exists() and images_dir.is_dir():
+            # Pre-captured JPEG images — skip video extraction
+            console.print("[green]Found pre-captured images, skipping video extraction[/green]")
+            frames_dir, matched_frames = load_captured_images(
+                images_dir=images_dir,
+                poses=[p.model_dump() for p in manifest.poses],
+                output_dir=work_dir / "extracted",
+                target_frame_count=config.target_frame_count,
+            )
+        elif manifest.assets.video_path:
+            # Legacy: extract from video
+            video_path = package_dir / manifest.assets.video_path
+            frames_dir, matched_frames = extract_frames(
+                video_path=video_path,
+                poses=[p.model_dump() for p in manifest.poses],
+                output_dir=work_dir / "extracted",
+                target_fps=config.target_fps,
+                include_limited_tracking=config.include_limited_tracking,
+                target_frame_count=config.target_frame_count,
+                video_start_time=manifest.video_start_time,
+                transpose=config.transpose
+            )
+        else:
+            raise ExtractionError("No images directory or video file found in scan package")
     except ExtractionError as e:
         console.print(f"[bold red]Frame extraction failed:[/bold red] {e}")
         raise
@@ -153,7 +174,9 @@ def run_pipeline(
             manifest_path=package_dir / "scan_manifest.json",
             frames_dir=frames_dir,
             output_path=transforms_path,
-            frames_manifest_path=work_dir / "extracted" / "frames_manifest.json"
+            frames_manifest_path=work_dir / "extracted" / "frames_manifest.json",
+            rotate_180=config.rotate_180,
+            transpose=config.transpose
         )
     except ConversionError as e:
         console.print(f"[bold red]Pose conversion failed:[/bold red] {e}")
@@ -332,6 +355,8 @@ def main(
     skip_training: bool = typer.Option(False, "--skip-training", help="Skip training stage"),
     target_fps: Optional[float] = typer.Option(None, help="Target FPS for frame extraction"),
     target_frames: int = typer.Option(250, help="Target number of frames (default: 250, use 0 for no limit)"),
+    rotate_180: bool = typer.Option(False, "--rotate-180", help="Rotate cameras 180 degrees (fix for upside down scenes)"),
+    transpose: Optional[int] = typer.Option(None, help="FFmpeg transpose: 1=90CW, 2=90CCW"),
     no_zip: bool = typer.Option(False, "--no-zip", help="Don't create ZIP archive"),
     compression: str = typer.Option("high", help="Compression quality: low, medium, high"),
 ):
@@ -350,6 +375,8 @@ def main(
         target_frame_count=target_frames if target_frames > 0 else None,
         create_zip=not no_zip,
         compression_quality=compression,
+        rotate_180=rotate_180,
+        transpose=transpose,
     )
 
     try:
