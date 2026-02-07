@@ -40,7 +40,7 @@ class TrainingConfig:
         """Convert to nerfstudio CLI arguments."""
         # Note: nerfstudio uses top-level --max-num-iterations, not --pipeline.model.*
         return [
-            f"--max-num-iterations={self.max_iterations}",
+            '--max-num-iterations', str(self.max_iterations),
         ]
 
 
