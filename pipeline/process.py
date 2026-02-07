@@ -9,14 +9,18 @@ import time
 from pathlib import Path
 from typing import Optional, Dict
 from dataclasses import dataclass, field
+import numpy as np
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 import typer
 
 from .ingest import ingest, IngestError
-from .extract_frames import extract_frames, load_captured_images, ExtractionError
-from .convert_poses import convert_from_manifest, ConversionError
+from .extract_frames import (
+    extract_frames, load_captured_images, ExtractionError,
+    compute_brightness_stats,
+)
+from .convert_poses import convert_from_manifest, compute_scene_bounds, ConversionError
 from .train import train_and_export, TrainingConfig, TrainingError
 from .compress import compress_ply_to_spz, CompressionError
 from .collision import (
@@ -27,6 +31,7 @@ from .collision import (
 )
 from .package import create_tour_package, create_zip_package, PackageError
 from .quality_assessment import split_train_test_frames, evaluate_model
+from .postprocess_splat import cleanup_splat
 
 console = Console()
 app = typer.Typer(help="Reality Engine Processing Pipeline")
@@ -129,6 +134,24 @@ def run_pipeline(
                       scan_id=manifest.scan_id if manifest else None,
                       pose_count=len(manifest.poses) if manifest else 0)
 
+    # Adaptive frame count: compute rough scene diagonal from manifest poses
+    raw_positions = []
+    for pose in manifest.poses:
+        m = pose.transform_matrix
+        if len(m) == 16:
+            pos = [m[3], m[7], m[11]]
+            if any(abs(p) > 0.05 for p in pos):  # skip near-origin poses
+                raw_positions.append(pos)
+    if raw_positions:
+        pos_arr = np.array(raw_positions)
+        extent = pos_arr.max(axis=0) - pos_arr.min(axis=0)
+        rough_diagonal = float(np.linalg.norm(extent))
+        adaptive_count = int(np.clip(50 * rough_diagonal, 100, 500))
+        if config.target_frame_count == 250:  # only override default
+            config.target_frame_count = adaptive_count
+            console.print(f"[blue]Adaptive frame count: {adaptive_count} "
+                          f"(diagonal ~{rough_diagonal:.1f}m)[/blue]")
+
     # Stage 2: Get Frames
     console.print("\n[bold]Stage 2: Get Frames[/bold]")
     stage_start = time.time()
@@ -163,8 +186,13 @@ def run_pipeline(
     except ExtractionError as e:
         console.print(f"[bold red]Frame extraction failed:[/bold red] {e}")
         raise
+    # Compute brightness variation for appearance embedding decision
+    brightness_stats = compute_brightness_stats(matched_frames)
+    high_lighting_variation = brightness_stats['std'] > 30
+
     stats.record_stage("extract_frames", time.time() - stage_start,
-                      frame_count=len(matched_frames))
+                      frame_count=len(matched_frames),
+                      brightness_std=brightness_stats['std'])
 
     # Stage 3: Convert Poses
     console.print("\n[bold]Stage 3: Convert Poses[/bold]")
@@ -183,6 +211,51 @@ def run_pipeline(
         console.print(f"[bold red]Pose conversion failed:[/bold red] {e}")
         raise
     stats.record_stage("convert_poses", time.time() - stage_start)
+
+    # Stage 3b: Depth Maps from LiDAR (optional)
+    has_depth = False
+    mesh_path = None
+    if hasattr(manifest.assets, 'mesh_path') and manifest.assets.mesh_path:
+        mesh_path = package_dir / manifest.assets.mesh_path
+    else:
+        candidate = package_dir / "mesh.ply"
+        if candidate.exists():
+            mesh_path = candidate
+
+    if mesh_path and mesh_path.exists():
+        console.print("\n[bold]Stage 3b: Generate Depth Maps from LiDAR[/bold]")
+        stage_start_depth = time.time()
+        try:
+            from .depth_supervision import generate_depth_maps
+            # Get intrinsics from transforms
+            with open(transforms_path) as _f:
+                _tf = json.load(_f)
+            depth_dir = work_dir / "extracted" / "depth"
+            depth_count = generate_depth_maps(
+                mesh_path=mesh_path,
+                transforms_path=transforms_path,
+                output_dir=depth_dir,
+                image_width=int(_tf['w']),
+                image_height=int(_tf['h']),
+                fx=_tf['fl_x'], fy=_tf['fl_y'],
+                cx=_tf['cx'], cy=_tf['cy'],
+            )
+            if depth_count > 0:
+                has_depth = True
+                # Re-run pose conversion to pick up depth paths
+                convert_from_manifest(
+                    manifest_path=package_dir / "scan_manifest.json",
+                    frames_dir=frames_dir,
+                    output_path=transforms_path,
+                    frames_manifest_path=work_dir / "extracted" / "frames_manifest.json",
+                    rotate_180=config.rotate_180,
+                    transpose=config.transpose,
+                )
+                console.print(f"[green]Depth maps linked in transforms.json[/green]")
+            stats.record_stage("depth_maps", time.time() - stage_start_depth,
+                              depth_count=depth_count)
+        except Exception as e:
+            console.print(f"[yellow]Depth map generation skipped: {e}[/yellow]")
 
     # Stage 4: Train Gaussian Splat
     quality_metrics = {}
@@ -206,14 +279,42 @@ def run_pipeline(
                 frames_link.unlink() if frames_link.is_symlink() else shutil.rmtree(frames_link)
             frames_link.symlink_to(frames_dir.resolve())
 
-            training_config = TrainingConfig(
-                max_iterations=config.training_iterations,
+            # Link depth maps if available
+            if has_depth:
+                depth_src = work_dir / "extracted" / "depth"
+                depth_link = train_data_dir / "depth"
+                if depth_link.exists() or depth_link.is_symlink():
+                    depth_link.unlink() if depth_link.is_symlink() else shutil.rmtree(depth_link)
+                depth_link.symlink_to(depth_src.resolve())
+
+            # Load transforms to get scene bounds for adaptive config
+            with open(transforms_path) as _tf:
+                _transforms = json.load(_tf)
+            scene_bounds = compute_scene_bounds(_transforms)
+            scene_diagonal = scene_bounds['diagonal']
+
+            training_config = TrainingConfig.for_scene(
+                diagonal=scene_diagonal,
+                base_iterations=config.training_iterations,
             )
+            # Build extra model args (appearance embedding for high lighting variation)
+            extra_args = []
+            if high_lighting_variation:
+                console.print(f"[blue]High lighting variation detected "
+                              f"(brightness std={brightness_stats['std']:.0f}). "
+                              f"Appearance embedding will be attempted.[/blue]")
+                extra_args.extend([
+                    '--pipeline.model.use-appearance-embedding', 'True',
+                    '--pipeline.model.appearance-embed-dim', '32',
+                ])
+
             ply_path = train_and_export(
                 data_dir=train_data_dir,
                 output_dir=work_dir / "training",
                 config=training_config,
-                experiment_name=scan_id
+                experiment_name=scan_id,
+                use_depth=has_depth,
+                extra_model_args=extra_args or None,
             )
 
             # Evaluate quality against test views
@@ -251,23 +352,64 @@ def run_pipeline(
         if ply_path is None:
             console.print("[yellow]No Gaussian splat PLY found, skipping compression[/yellow]")
 
-    # Stage 5: Prepare Splat File
-    # Note: SPZ compression requires Niantic's spz tool. For now, use PLY directly.
-    # Most viewers (SuperSplat, etc.) support PLY format natively.
-    console.print("\n[bold]Stage 5: Prepare Splat File[/bold]")
+    # Stage 5: Cleanup & Prepare Splat File
+    console.print("\n[bold]Stage 5: Cleanup & Prepare Splat[/bold]")
     stage_start = time.time()
+    lod_levels = []
     if config.skip_training and ply_path is None:
-        # Create dummy PLY for testing
         console.print("[yellow]Creating dummy PLY for local testing[/yellow]")
         splat_path = work_dir / "scene.ply"
         splat_path.write_text('ply\nformat ascii 1.0\nelement vertex 0\nend_header\n')
         compression_stats = {'compression_ratio': 1, 'note': 'dummy for testing'}
     else:
-        # Use PLY directly (no compression)
-        splat_path = ply_path
-        ply_size = ply_path.stat().st_size / (1024 * 1024)
-        console.print(f"[green]Using PLY directly: {ply_path.name} ({ply_size:.1f} MB)[/green]")
-        compression_stats = {'compression_ratio': 1, 'format': 'ply', 'size_mb': ply_size}
+        # Run splat cleanup (floater removal, opacity/scale culling)
+        try:
+            # Get camera positions for bbox cropping
+            cam_positions = None
+            if transforms_path.exists():
+                with open(transforms_path) as _f:
+                    _tf = json.load(_f)
+                cam_positions = np.array([
+                    np.array(fr['transform_matrix'])[:3, 3]
+                    for fr in _tf.get('frames', [])
+                ])
+
+            cleaned_path = work_dir / "scene_cleaned.ply"
+            cleanup_stats = cleanup_splat(
+                ply_path, cleaned_path,
+                camera_positions=cam_positions,
+            )
+            ply_path = cleaned_path
+            stats.record_stage("cleanup", 0, **cleanup_stats)
+        except Exception as e:
+            console.print(f"[yellow]Cleanup warning: {e} — using raw PLY[/yellow]")
+
+        # Compress to SPZ (fallback to PLY on failure)
+        try:
+            spz_path = work_dir / "scene.spz"
+            spz_path, compression_stats = compress_ply_to_spz(
+                ply_path, spz_path, quality=config.compression_quality)
+            splat_path = spz_path
+        except Exception as e:
+            console.print(f"[yellow]SPZ compression failed, using PLY: {e}[/yellow]")
+            splat_path = ply_path
+            ply_size = ply_path.stat().st_size / (1024 * 1024)
+            compression_stats = {'compression_ratio': 1, 'format': 'ply', 'size_mb': ply_size}
+
+        # Generate progressive LOD levels
+        lod_levels = []
+        try:
+            from .progressive_splat import generate_progressive_lods
+            lod_dir = work_dir / "lod"
+            lod_levels, lod_stats = generate_progressive_lods(
+                ply_path, lod_dir,
+                compress_spz=True,
+                compression_quality=config.compression_quality,
+            )
+            stats.record_stage("progressive_lod", 0, **lod_stats)
+        except Exception as e:
+            console.print(f"[yellow]LOD generation skipped: {e}[/yellow]")
+
     stats.record_stage("prepare_splat", time.time() - stage_start,
                       compression_ratio=compression_stats.get('compression_ratio', 1))
 
@@ -340,7 +482,8 @@ def run_pipeline(
             floorplan_path=floorplan_path,
             frames_dir=frames_dir,
             output_dir=output_dir,
-            processing_stats=stats.to_dict()
+            processing_stats=stats.to_dict(),
+            lod_levels=lod_levels if lod_levels else None,
         )
 
         if config.create_zip:

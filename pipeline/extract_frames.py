@@ -59,6 +59,35 @@ def compute_frame_quality(image_path: Path) -> float:
     return 0.7 * sharpness + 0.3 * exposure
 
 
+def compute_brightness_stats(frames: List['ExtractedFrame']) -> Dict:
+    """
+    Compute brightness statistics across all frames.
+
+    Returns:
+        Dict with mean, std, min, max brightness values (0-255 scale).
+        High std (>30) indicates significant lighting variation.
+    """
+    brightnesses = []
+    for frame in frames:
+        img = cv2.imread(str(frame.image_path), cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            brightnesses.append(float(img.mean()))
+
+    if not brightnesses:
+        return {"mean": 0, "std": 0, "min": 0, "max": 0}
+
+    arr = np.array(brightnesses)
+    stats = {
+        "mean": float(arr.mean()),
+        "std": float(arr.std()),
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+    }
+    console.print(f"[dim]Brightness stats: mean={stats['mean']:.0f}, "
+                  f"std={stats['std']:.0f}, range={stats['min']:.0f}-{stats['max']:.0f}[/dim]")
+    return stats
+
+
 def is_valid_pose(pose: dict) -> bool:
     """
     Check if pose has valid position (not at origin).
@@ -467,59 +496,95 @@ def downsample_frames(
                   f"min={quality_scores.min():.3f}, max={quality_scores.max():.3f}[/dim]")
 
     if target_count and use_movement_based:
-        # Movement-based selection with quality tiebreaking
-        distances = [0.0]
-        for i in range(1, len(positions)):
-            dist = np.linalg.norm(positions[i] - positions[i-1])
-            distances.append(distances[-1] + dist)
+        # Spatial coverage selection: ensures all areas of the scene
+        # get sufficient frame coverage, not just uniform path sampling.
+        #
+        # Algorithm:
+        # 1. Divide scene into spatial grid cells
+        # 2. First pass: greedy set-cover — pick frames that cover
+        #    under-represented cells, preferring higher quality
+        # 3. Second pass: fill remaining slots with path-distance selection
 
-        total_distance = distances[-1]
-        if total_distance < 0.01:
-            # Fall back to uniform temporal sampling, prefer quality
-            indices = np.linspace(0, len(frames) - 1, target_count, dtype=int)
-            return [frames[i] for i in indices]
+        # Compute view directions for coverage analysis
+        view_dirs = []
+        for frame in frames:
+            m = row_major_to_matrix(frame.transform_matrix)
+            # Camera looks along -Z in OpenGL convention
+            view_dirs.append(m[:3, :3] @ np.array([0, 0, -1]))
+        view_dirs = np.array(view_dirs)
 
-        distances_arr = np.array(distances)
-        # Assign each frame to the nearest path segment
-        target_distances = np.linspace(0, total_distance, target_count)
-        segment_half_width = (total_distance / target_count) / 2.0
+        # Build spatial grid
+        pos_min = positions.min(axis=0)
+        pos_max = positions.max(axis=0)
+        extent = pos_max - pos_min
+        # Grid resolution: ~8-12 cells per axis for typical scenes
+        grid_res = max(8, min(12, int(np.ceil(extent.max() / 0.5))))
+        cell_size = (extent + 1e-6) / grid_res
+
+        # Assign each frame to a grid cell
+        cell_ids = np.floor((positions - pos_min) / cell_size).astype(int)
+        cell_ids = np.clip(cell_ids, 0, grid_res - 1)
+        # Flatten to single cell ID
+        cell_keys = cell_ids[:, 0] * grid_res * grid_res + cell_ids[:, 1] * grid_res + cell_ids[:, 2]
+
+        # Count frames per cell
+        unique_cells = np.unique(cell_keys)
+        cell_frame_count = {c: 0 for c in unique_cells}
 
         selected_indices = []
         used = set()
 
-        for target_dist in target_distances:
-            # Find all candidate frames within this segment
-            candidates = np.where(
-                np.abs(distances_arr - target_dist) <= segment_half_width
-            )[0]
-            candidates = [c for c in candidates if c not in used]
+        # Pass 1: Greedy coverage — iterate through under-covered cells
+        # and pick the best-quality frame for each
+        frames_per_cell_target = max(1, target_count // max(len(unique_cells), 1))
 
-            if candidates:
-                # Pick the one with highest quality score
+        for _round in range(frames_per_cell_target):
+            # Sort cells by coverage (least-covered first)
+            sorted_cells = sorted(unique_cells, key=lambda c: cell_frame_count[c])
+            for cell in sorted_cells:
+                if len(selected_indices) >= target_count:
+                    break
+                # Find unselected frames in this cell
+                candidates = [i for i in range(len(frames))
+                              if cell_keys[i] == cell and i not in used]
+                if not candidates:
+                    continue
+                # Pick highest quality
                 best = max(candidates, key=lambda c: quality_scores[c])
                 selected_indices.append(best)
                 used.add(best)
-            else:
-                # Fallback: nearest unselected frame
-                idx = np.argmin(np.abs(distances_arr - target_dist))
-                if idx not in used:
-                    selected_indices.append(idx)
-                    used.add(idx)
-                else:
-                    for offset in range(1, len(frames)):
-                        for candidate in [idx + offset, idx - offset]:
-                            if 0 <= candidate < len(frames) and candidate not in used:
-                                selected_indices.append(candidate)
-                                used.add(candidate)
-                                break
-                        else:
-                            continue
+                cell_frame_count[cell] += 1
+
+        # Pass 2: Fill remaining slots with path-distance selection + quality
+        if len(selected_indices) < target_count:
+            distances = [0.0]
+            for i in range(1, len(positions)):
+                dist = np.linalg.norm(positions[i] - positions[i - 1])
+                distances.append(distances[-1] + dist)
+            distances_arr = np.array(distances)
+            total_distance = distances_arr[-1]
+            remaining = target_count - len(selected_indices)
+
+            if total_distance > 0.01 and remaining > 0:
+                target_dists = np.linspace(0, total_distance, remaining + 2)[1:-1]
+                for td in target_dists:
+                    if len(selected_indices) >= target_count:
                         break
+                    # Find nearest unselected
+                    diffs = np.abs(distances_arr - td)
+                    order = np.argsort(diffs)
+                    for idx in order:
+                        if idx not in used:
+                            selected_indices.append(idx)
+                            used.add(idx)
+                            break
 
         selected_indices = sorted(set(selected_indices))
+        cells_covered = len(set(cell_keys[i] for i in selected_indices))
         selected_quality = quality_scores[selected_indices].mean()
-        console.print(f"[blue]Quality-weighted selection: {len(selected_indices)} frames "
-                      f"covering {total_distance:.2f}m, avg quality={selected_quality:.3f}[/blue]")
+        console.print(f"[blue]Coverage selection: {len(selected_indices)} frames, "
+                      f"{cells_covered}/{len(unique_cells)} spatial cells covered, "
+                      f"avg quality={selected_quality:.3f}[/blue]")
         return [frames[i] for i in selected_indices]
 
     if target_count:

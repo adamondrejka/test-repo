@@ -28,8 +28,8 @@ class TrainingConfig:
     warmup_iterations: int = 500
     densify_until: int = 15000          # stop-split-at
     densify_interval: int = 100         # refine-every
-    densify_grad_thresh: float = 0.0004 # ns default 0.0008, lower = more splats
-    cull_alpha_thresh: float = 0.005    # ns default 0.1, lower = keep more translucent
+    densify_grad_thresh: float = 0.0006 # ns default 0.0008, slightly lower for more detail
+    cull_alpha_thresh: float = 0.05     # ns default 0.1, moderate — cull most transparent splats
     cull_scale_thresh: float = 0.5      # cull huge gaussians
     split_screen_size: float = 0.05     # ns default 0.05
     cull_screen_size: float = 0.15      # ns default 0.15
@@ -58,6 +58,60 @@ class TrainingConfig:
             '--pipeline.model.sh-degree', str(self.sh_degree),
             '--pipeline.model.num-downscales', str(self.num_downscales),
         ]
+
+
+    @classmethod
+    def for_scene(cls, diagonal: float, base_iterations: int = 30000) -> 'TrainingConfig':
+        """Create a scene-adaptive training config based on scene diagonal (meters).
+
+        Profiles:
+          Small  (<5m):  bathroom/closet — fast convergence, aggressive densification
+          Medium (5-15m): typical room/apartment — balanced defaults
+          Large  (15-40m): office/warehouse — more iterations, conservative
+          XL     (40m+): multi-floor/outdoor — max iterations, very conservative
+        """
+        if diagonal < 5:
+            profile = "small"
+            config = cls(
+                max_iterations=min(base_iterations, 20000),
+                densify_until=10000,
+                densify_grad_thresh=0.0005,  # slightly more aggressive for small spaces
+                cull_alpha_thresh=0.05,
+                num_downscales=0,
+            )
+        elif diagonal < 15:
+            profile = "medium"
+            config = cls(
+                max_iterations=base_iterations,
+                densify_until=15000,
+                densify_grad_thresh=0.0006,
+                cull_alpha_thresh=0.05,
+                num_downscales=0,
+            )
+        elif diagonal < 40:
+            profile = "large"
+            config = cls(
+                max_iterations=max(base_iterations, 40000),
+                densify_until=20000,
+                densify_grad_thresh=0.0007,  # conservative — less memory pressure
+                cull_alpha_thresh=0.08,
+                cull_scale_thresh=0.3,       # tighter culling for large scenes
+                num_downscales=1,            # start with 1 downscale for memory
+            )
+        else:
+            profile = "xl"
+            config = cls(
+                max_iterations=max(base_iterations, 50000),
+                densify_until=25000,
+                densify_grad_thresh=0.0008,  # nerfstudio default
+                cull_alpha_thresh=0.1,       # nerfstudio default for XL
+                cull_scale_thresh=0.2,
+                num_downscales=2,
+            )
+
+        console.print(f"[blue]Training profile: {profile} "
+                      f"(diagonal={diagonal:.1f}m, {config.max_iterations} iterations)[/blue]")
+        return config
 
 
 class TrainingError(Exception):
@@ -145,7 +199,9 @@ def train_gaussian_splat(
     config: Optional[TrainingConfig] = None,
     experiment_name: str = "reality_scan",
     use_viewer: bool = False,
-    verbose: bool = True
+    verbose: bool = True,
+    use_depth: bool = False,
+    extra_model_args: Optional[List[str]] = None,
 ) -> Path:
     """
     Train a Gaussian Splat model using Nerfstudio.
@@ -210,6 +266,10 @@ def train_gaussian_splat(
     # Add config arguments (must be before nerfstudio-data subcommand)
     cmd.extend(config.to_nerfstudio_args())
 
+    # Extra model args (e.g., appearance embedding)
+    if extra_model_args:
+        cmd.extend(extra_model_args)
+
     # Viewer settings - use 'tensorboard' for logging without external service
     if not use_viewer:
         cmd.extend(['--viewer.quit-on-train-completion', 'True'])
@@ -217,6 +277,13 @@ def train_gaussian_splat(
 
     # Dataparser subcommand and its args go LAST
     cmd.extend(['nerfstudio-data', '--data', str(data_dir)])
+
+    # Depth supervision (if depth maps available and flag set)
+    if use_depth:
+        cmd.extend([
+            '--pipeline.datamanager.dataparser.depth-unit-scale-factor', '0.001',
+        ])
+        console.print(f"[blue]Depth supervision enabled (LiDAR depth maps)[/blue]")
 
     console.print(f"[blue]Starting Gaussian Splat training...[/blue]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
@@ -313,7 +380,9 @@ def train_and_export(
     data_dir: Path,
     output_dir: Path,
     config: Optional[TrainingConfig] = None,
-    experiment_name: str = "reality_scan"
+    experiment_name: str = "reality_scan",
+    use_depth: bool = False,
+    extra_model_args: Optional[List[str]] = None,
 ) -> Path:
     """
     Complete training pipeline: train and export to PLY.
@@ -323,6 +392,8 @@ def train_and_export(
         output_dir: Directory for all outputs
         config: Training configuration
         experiment_name: Name for the experiment
+        use_depth: Enable depth supervision from LiDAR
+        extra_model_args: Additional nerfstudio model CLI args
 
     Returns:
         Path to exported PLY file
@@ -332,7 +403,9 @@ def train_and_export(
         data_dir,
         output_dir / "training",
         config=config,
-        experiment_name=experiment_name
+        experiment_name=experiment_name,
+        use_depth=use_depth,
+        extra_model_args=extra_model_args,
     )
 
     # Export

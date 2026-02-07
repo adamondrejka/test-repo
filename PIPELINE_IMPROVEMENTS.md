@@ -69,40 +69,43 @@ Current pipeline produces suboptimal Gaussian Splats for real estate scanning. K
 ## Phase 2 — Major Quality Improvements
 
 ### 2.1 Appearance Embedding for Lighting
-- **File**: `pipeline/train.py`
-- Add `--pipeline.model.use-appearance-embedding True` when brightness std > 30
-- Handles windows + mixed lighting (real estate #1 visual issue)
+- **File**: `pipeline/train.py`, `pipeline/process.py`, `pipeline/extract_frames.py`
+- Computes brightness std across frames; if > 30, adds `--pipeline.model.use-appearance-embedding True`
+- Note: flag may not exist in nerfstudio 1.1.5 splatfacto — verify with `--help`
 - **Impact**: High | **Effort**: Low
-- **Status**: [ ] TODO
+- **Status**: [x] DONE (conditional, needs nerfstudio flag verification)
 
 ### 2.2 Depth Supervision from LiDAR Mesh
-- **Files**: New `pipeline/depth_supervision.py`, modify `convert_poses.py`, `train.py`
-- Render depth maps from `mesh.ply` at each camera pose via trimesh ray casting
-- Add depth paths to transforms.json, enable `--pipeline.model.depth-loss-mult 0.1`
-- Biggest ROI for Pro devices (all have LiDAR)
+- **Files**: New `pipeline/depth_supervision.py`, `convert_poses.py`, `train.py`, `process.py`
+- Renders depth maps from `mesh.ply` at each camera pose via trimesh ray casting (16-bit PNG, mm)
+- Depth paths auto-detected and added to transforms.json
+- Training adds `--pipeline.datamanager.dataparser.depth-unit-scale-factor 0.001`
+- Runs only when mesh.ply exists in scan package (Pro devices with LiDAR)
 - **Impact**: Very high | **Effort**: Medium-high
-- **Status**: [ ] TODO
+- **Status**: [x] DONE
 
 ### 2.3 Scene-Adaptive Training Profiles
-- **File**: `pipeline/train.py`
-- Auto-detect from scene diagonal: Small (<5m) 20k iter, Medium (5-15m) 30k, Large (15-40m) 40k, XL (40m+) 50k
-- Each profile adjusts densification, LR, and other params
+- **File**: `pipeline/train.py` (`TrainingConfig.for_scene()`)
+- Auto-detect from scene diagonal: Small (<5m) 20k, Medium (5-15m) 30k, Large (15-40m) 40k, XL (40m+) 50k
+- Each profile adjusts densification, culling, LR, downscales
 - **Impact**: Medium-high | **Effort**: Low-medium
-- **Status**: [ ] TODO
+- **Status**: [x] DONE
 
 ### 2.4 View Coverage Optimization
-- **File**: `pipeline/extract_frames.py`
-- Spatial grid + greedy set-cover: prefer frames that cover under-represented areas
-- Prevents over-sampling corridors, under-sampling rooms
+- **File**: `pipeline/extract_frames.py` (`downsample_frames()`)
+- Spatial grid + greedy set-cover: ensures all spatial cells get frames
+- Combines with quality scoring — picks best frame per cell
+- Fills remaining slots with path-distance selection
 - **Impact**: High | **Effort**: Medium
-- **Status**: [ ] TODO
+- **Status**: [x] DONE
 
 ### 2.5 Gaussian Splat Cleanup / Floater Removal
 - **File**: New `pipeline/postprocess_splat.py`
-- Statistical outlier removal, cull transparent splats, clamp extreme scales, crop outside bbox
-- Reuse `read_gaussian_ply()` from `compress.py:230`
+- Voxel-based statistical outlier removal, opacity culling, scale clamping, bbox cropping
+- Reuses `read_gaussian_ply()` from `compress.py`, writes filtered PLY preserving format
+- Runs after training, before packaging
 - **Impact**: Medium-high | **Effort**: Medium
-- **Status**: [ ] TODO
+- **Status**: [x] DONE
 
 ---
 

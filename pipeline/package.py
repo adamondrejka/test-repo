@@ -26,7 +26,10 @@ def generate_thumbnail(
     size: tuple = (400, 300)
 ) -> Path:
     """
-    Generate a thumbnail from the first good frame.
+    Generate a thumbnail from the sharpest, best-lit frame.
+
+    Scores up to 20 evenly-spaced candidate frames by sharpness and
+    brightness balance, picking the best one instead of the first frame.
 
     Args:
         frames_dir: Directory containing frames
@@ -36,19 +39,43 @@ def generate_thumbnail(
     Returns:
         Path to generated thumbnail
     """
-    frames = sorted(frames_dir.glob("frame_*.jpg"))
+    frames = sorted(frames_dir.glob("frame_*.jpg")) + sorted(frames_dir.glob("frame_*.png"))
 
     if not frames:
         raise PackageError("No frames found for thumbnail")
 
-    # Use first frame
-    source_frame = frames[0]
+    # Score up to 20 evenly-spaced frames
+    candidates = frames[::max(1, len(frames) // 20)]
+    best_score = -1
+    best_frame = candidates[0]
 
     try:
-        with Image.open(source_frame) as img:
-            # Create thumbnail maintaining aspect ratio
-            img.thumbnail(size, Image.Resampling.LANCZOS)
+        import cv2
+        import numpy as np
 
+        for frame_path in candidates:
+            img = cv2.imread(str(frame_path))
+            if img is None:
+                continue
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Sharpness (Laplacian variance)
+            sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+            # Brightness (penalize too dark or too bright)
+            brightness = gray.mean()
+            brightness_score = 1.0 - abs(brightness - 127) / 127
+            score = sharpness * brightness_score
+            if score > best_score:
+                best_score = score
+                best_frame = frame_path
+
+        console.print(f"[green]Selected thumbnail: {best_frame.name} "
+                      f"(score={best_score:.0f})[/green]")
+    except ImportError:
+        console.print("[yellow]cv2 not available, using first frame for thumbnail[/yellow]")
+
+    try:
+        with Image.open(best_frame) as img:
+            img.thumbnail(size, Image.Resampling.LANCZOS)
             output_path = output_path.with_suffix('.jpg')
             output_path.parent.mkdir(parents=True, exist_ok=True)
             img.save(output_path, 'JPEG', quality=85)
@@ -64,7 +91,8 @@ def create_metadata(
     scan_manifest: Dict,
     processing_stats: Dict,
     output_path: Path,
-    splat_filename: str = "scene.ply"
+    splat_filename: str = "scene.ply",
+    lod_levels: Optional[List[Dict]] = None,
 ) -> Path:
     """
     Create metadata.json for the tour package.
@@ -92,7 +120,10 @@ def create_metadata(
             "frame_count": len(scan_manifest.get("poses", [])),
         },
         "assets": {
-            "splat": splat_filename,
+            "splat": {
+                "file": splat_filename,
+                "lod_levels": lod_levels or [],
+            },
             "collision": "collision.glb",
             "floorplan": "floorplan.svg",
             "thumbnail": "thumbnail.jpg",
@@ -150,7 +181,8 @@ def create_tour_package(
     floorplan_path: Optional[Path],
     frames_dir: Path,
     output_dir: Path,
-    processing_stats: Optional[Dict] = None
+    processing_stats: Optional[Dict] = None,
+    lod_levels: Optional[List[Dict]] = None,
 ) -> Path:
     """
     Create a complete tour package.
@@ -190,6 +222,17 @@ def create_tour_package(
     shutil.copy(splat_path, package_dir / splat_output_name)
     console.print(f"  Copied {splat_output_name}")
 
+    # Copy LOD files if available
+    if lod_levels:
+        lod_source_dir = splat_path.parent / "lod"
+        for lod in lod_levels:
+            # Prefer SPZ, fall back to PLY
+            lod_file = lod.get("file_spz", lod["file"])
+            lod_src = lod_source_dir / lod_file
+            if lod_src.exists():
+                shutil.copy(lod_src, package_dir / lod_file)
+                console.print(f"  Copied {lod_file}")
+
     # Copy collision mesh if available
     if collision_path and collision_path.exists():
         shutil.copy(collision_path, package_dir / "collision.glb")
@@ -212,7 +255,8 @@ def create_tour_package(
         scan_manifest,
         processing_stats or {},
         package_dir / "metadata.json",
-        splat_filename=splat_output_name
+        splat_filename=splat_output_name,
+        lod_levels=lod_levels,
     )
 
     # Calculate total package size

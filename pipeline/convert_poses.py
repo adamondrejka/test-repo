@@ -71,6 +71,7 @@ def create_nerfstudio_frame(
     timestamp: Optional[float] = None,
     rotate_180: bool = False,
     transpose: Optional[int] = None,
+    depth_file_path: Optional[str] = None,
 ) -> Dict:
     """
     Create a single frame entry for Nerfstudio transforms.json.
@@ -128,6 +129,9 @@ def create_nerfstudio_frame(
 
     if timestamp is not None:
         frame["timestamp"] = timestamp
+
+    if depth_file_path is not None:
+        frame["depth_file_path"] = depth_file_path
 
     return frame
 
@@ -227,6 +231,7 @@ def create_transforms_json(
                 timestamp=frame_data.get('timestamp'),
                 rotate_180=rotate_180,
                 transpose=transpose,
+                depth_file_path=frame_data.get('depth_file_path'),
             )
             transforms['frames'].append(frame)
         except ConversionError as e:
@@ -300,20 +305,31 @@ def convert_from_manifest(
 
     calibration = manifest['calibration']
 
+    # Detect depth directory alongside frames
+    depth_dir = frames_dir.parent / "depth"
+    has_depth = depth_dir.exists() and any(depth_dir.glob("*.png"))
+    if has_depth:
+        console.print(f"[blue]Found depth maps in {depth_dir}[/blue]")
+
     # Determine frame-pose mapping
     if frames_manifest_path and frames_manifest_path.exists():
         # Use pre-computed frame-pose matching
         with open(frames_manifest_path, 'r') as f:
             frames_data = json.load(f)
 
-        frames = [
-            {
+        frames = []
+        for fd in frames_data:
+            frame_entry = {
                 'image_path': f"./frames/{fd['image_path']}",
                 'transform_matrix': fd['transform_matrix'],
                 'timestamp': fd['pose_timestamp'],
             }
-            for fd in frames_data
-        ]
+            if has_depth:
+                depth_name = Path(fd['image_path']).stem.replace('frame_', 'depth_') + '.png'
+                depth_path = depth_dir / depth_name
+                if depth_path.exists():
+                    frame_entry['depth_file_path'] = f"./depth/{depth_name}"
+            frames.append(frame_entry)
     else:
         # Assume 1:1 mapping between frames and poses
         frame_files = sorted(frames_dir.glob("frame_*.jpg"))
@@ -325,11 +341,17 @@ def convert_from_manifest(
 
         frames = []
         for i, (frame_file, pose) in enumerate(zip(frame_files, poses)):
-            frames.append({
+            frame_entry = {
                 'image_path': f"./frames/{frame_file.name}",
                 'transform_matrix': pose['transform_matrix'],
                 'timestamp': pose.get('timestamp'),
-            })
+            }
+            if has_depth:
+                depth_name = frame_file.stem.replace('frame_', 'depth_') + '.png'
+                depth_path = depth_dir / depth_name
+                if depth_path.exists():
+                    frame_entry['depth_file_path'] = f"./depth/{depth_name}"
+            frames.append(frame_entry)
 
     return create_transforms_json(
         frames,
