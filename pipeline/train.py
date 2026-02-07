@@ -165,7 +165,7 @@ def train_gaussian_splat(
         '--output-dir', str(output_dir),
         '--experiment-name', experiment_name,
         '--timestamp', 'latest',
-        '--pipeline.model.camera-optimizer.mode', 'off',
+        '--pipeline.model.camera-optimizer.mode', 'SO3xR3',
     ]
 
     # Add config arguments

@@ -134,7 +134,7 @@ def create_transforms_json(
     calibration: Dict,
     output_path: Path,
     frames_dir: Optional[Path] = None,
-    aabb_scale: int = 16,
+    aabb_scale: int = 4,
     camera_model: str = "OPENCV",
     rotate_180: bool = False,
     transpose: Optional[int] = None
