@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir \
     pydantic
 
 # Copy backend code to /app (not /workspace - RunPod overwrites that)
+# This includes depth_splatfacto/ plugin which registers via entry points
 WORKDIR /app
 COPY . /app/backend/
 RUN pip install -e /app/backend/

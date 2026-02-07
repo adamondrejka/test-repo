@@ -255,8 +255,11 @@ def train_gaussian_splat(
                       f"aabb_scale: {_tf.get('aabb_scale')}[/dim]")
 
     # Build command — training args BEFORE 'nerfstudio-data', dataparser args AFTER
+    # Use depth-splatfacto (our plugin) when depth maps are available.
+    # It extends splatfacto with L1 depth loss — all splatfacto params still work.
+    model_name = 'depth-splatfacto' if use_depth else 'splatfacto'
     cmd = [
-        'ns-train', 'splatfacto',
+        'ns-train', model_name,
         '--output-dir', str(output_dir),
         '--experiment-name', experiment_name,
         '--timestamp', 'latest',
@@ -265,6 +268,13 @@ def train_gaussian_splat(
 
     # Add config arguments (must be before nerfstudio-data subcommand)
     cmd.extend(config.to_nerfstudio_args())
+
+    # Depth supervision via our depth-splatfacto plugin
+    if use_depth:
+        cmd.extend([
+            '--pipeline.model.depth-loss-mult', '0.2',
+        ])
+        console.print(f"[blue]Depth supervision enabled via depth-splatfacto (depth-loss-mult=0.2)[/blue]")
 
     # Extra model args (e.g., appearance embedding)
     if extra_model_args:
@@ -278,18 +288,9 @@ def train_gaussian_splat(
     # Dataparser subcommand and its args go LAST
     cmd.extend(['nerfstudio-data', '--data', str(data_dir)])
 
-    # Depth supervision (if depth maps available and flag set)
+    # Dataparser needs depth scale factor to load depth maps
     if use_depth:
-        # Model depth loss arg goes BEFORE 'nerfstudio-data' subcommand — insert before it
-        nerfstudio_data_idx = cmd.index('nerfstudio-data')
-        cmd[nerfstudio_data_idx:nerfstudio_data_idx] = [
-            '--pipeline.model.depth-loss-mult', '0.2',
-        ]
-        # Dataparser arg goes AFTER 'nerfstudio-data' subcommand (short-form)
-        cmd.extend([
-            '--depth-unit-scale-factor', '0.001',
-        ])
-        console.print(f"[blue]Depth supervision enabled (LiDAR depth maps, depth-loss-mult=0.2)[/blue]")
+        cmd.extend(['--depth-unit-scale-factor', '0.001'])
 
     console.print(f"[blue]Starting Gaussian Splat training...[/blue]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
@@ -334,8 +335,8 @@ def train_gaussian_splat(
     except subprocess.CalledProcessError as e:
         raise TrainingError(f"Training failed: {e}")
 
-    # Find output model
-    model_dir = output_dir / experiment_name / "splatfacto" / "latest"
+    # Find output model — directory name matches model_name (splatfacto or dn-splatter)
+    model_dir = output_dir / experiment_name / model_name / "latest"
     if not model_dir.exists():
         # Try to find it
         for path in output_dir.rglob("config.yml"):

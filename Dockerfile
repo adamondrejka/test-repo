@@ -41,8 +41,11 @@ RUN pip install --upgrade pip setuptools wheel \
 # Install nerfstudio (requires separate installation)
 RUN pip install nerfstudio
 
-# Copy application code
+# Copy application code (includes depth_splatfacto/ plugin)
 COPY . .
+
+# Re-install in editable mode to register entry points (depth-splatfacto plugin)
+RUN pip install -e .
 
 # Create directories for data
 RUN mkdir -p /data/input /data/output /data/temp

@@ -40,12 +40,16 @@ dev = [
 [project.scripts]
 reality-process = "pipeline.process:app"
 
+# Register depth-splatfacto as a nerfstudio method plugin
+[project.entry-points."nerfstudio.method_configs"]
+depth-splatfacto = "depth_splatfacto.config:DepthSplatfactoSpecification"
+
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["pipeline*", "utils*"]
+include = ["pipeline*", "utils*", "depth_splatfacto*"]
 
 [tool.black]
 line-length = 100
