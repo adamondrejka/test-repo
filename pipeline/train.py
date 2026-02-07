@@ -182,23 +182,25 @@ def train_gaussian_splat(
         console.print(f"[dim]Frames: {len(_tf.get('frames', []))}, "
                       f"aabb_scale: {_tf.get('aabb_scale')}[/dim]")
 
-    # Build command — explicit 'nerfstudio-data' dataparser for transforms.json format
+    # Build command — training args BEFORE 'nerfstudio-data', dataparser args AFTER
     cmd = [
-        'ns-train', 'splatfacto', 'nerfstudio-data',
-        '--data', str(data_dir),
+        'ns-train', 'splatfacto',
         '--output-dir', str(output_dir),
         '--experiment-name', experiment_name,
         '--timestamp', 'latest',
         '--pipeline.model.camera-optimizer.mode', 'SO3xR3',
     ]
 
-    # Add config arguments
+    # Add config arguments (must be before nerfstudio-data subcommand)
     cmd.extend(config.to_nerfstudio_args())
 
     # Viewer settings - use 'tensorboard' for logging without external service
     if not use_viewer:
         cmd.extend(['--viewer.quit-on-train-completion', 'True'])
         cmd.extend(['--vis', 'tensorboard'])
+
+    # Dataparser subcommand and its args go LAST
+    cmd.extend(['nerfstudio-data', '--data', str(data_dir)])
 
     console.print(f"[blue]Starting Gaussian Splat training...[/blue]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
