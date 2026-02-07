@@ -279,12 +279,17 @@ def train_gaussian_splat(
     cmd.extend(['nerfstudio-data', '--data', str(data_dir)])
 
     # Depth supervision (if depth maps available and flag set)
-    # Note: after 'nerfstudio-data' subcommand, use short-form dataparser args
     if use_depth:
+        # Model depth loss arg goes BEFORE 'nerfstudio-data' subcommand — insert before it
+        nerfstudio_data_idx = cmd.index('nerfstudio-data')
+        cmd[nerfstudio_data_idx:nerfstudio_data_idx] = [
+            '--pipeline.model.depth-loss-mult', '0.2',
+        ]
+        # Dataparser arg goes AFTER 'nerfstudio-data' subcommand (short-form)
         cmd.extend([
             '--depth-unit-scale-factor', '0.001',
         ])
-        console.print(f"[blue]Depth supervision enabled (LiDAR depth maps)[/blue]")
+        console.print(f"[blue]Depth supervision enabled (LiDAR depth maps, depth-loss-mult=0.2)[/blue]")
 
     console.print(f"[blue]Starting Gaussian Splat training...[/blue]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
@@ -300,17 +305,26 @@ def train_gaussian_splat(
                 bufsize=1
             )
 
+            # Keep recent output for error reporting
+            from collections import deque
+            recent_lines = deque(maxlen=50)
+
             for line in process.stdout:
+                recent_lines.append(line.strip())
                 # Parse progress from output
                 if 'Iteration' in line or 'iter' in line.lower():
                     console.print(f"[dim]{line.strip()}[/dim]")
-                elif 'error' in line.lower():
+                elif 'error' in line.lower() or 'traceback' in line.lower():
                     console.print(f"[red]{line.strip()}[/red]")
                 elif 'warning' in line.lower():
                     console.print(f"[yellow]{line.strip()}[/yellow]")
 
             process.wait()
             if process.returncode != 0:
+                # Print last N lines for debugging
+                console.print(f"\n[red bold]Training failed (return code {process.returncode}). Last output:[/red bold]")
+                for line in recent_lines:
+                    console.print(f"[red]  {line}[/red]")
                 raise TrainingError(f"Training failed with return code {process.returncode}")
         else:
             result = subprocess.run(cmd, capture_output=True, text=True)
