@@ -57,16 +57,16 @@ GROUND_COLOR_B = (120, 120, 120)
 
 # ── Camera settings ──────────────────────────────────────────────────
 
-IMAGE_W = 640
-IMAGE_H = 480
-FX = FY = 500.0
+IMAGE_W = 960
+IMAGE_H = 720
+FX = FY = 750.0
 CX = IMAGE_W / 2.0
 CY = IMAGE_H / 2.0
 
-NUM_RINGS = 3
+NUM_RINGS = 6
 CAMERAS_PER_RING = 12
 CAMERA_RADIUS = 3.0
-RING_HEIGHTS = [0.0, 0.8, -0.4]  # relative to cube center
+RING_HEIGHTS = [-0.8, -0.2, 0.4, 1.0, 1.6, 2.2]  # better vertical coverage of cube (y ∈ [-0.5, +0.5])
 TARGET = np.array([0.0, 0.0, 0.0])  # look at cube center
 
 
