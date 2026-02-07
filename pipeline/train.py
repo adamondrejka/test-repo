@@ -158,9 +158,33 @@ def train_gaussian_splat(
     config = config or TrainingConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build command
+    # Log Nerfstudio version for debugging
+    try:
+        ver = subprocess.run(['pip', 'show', 'nerfstudio'], capture_output=True, text=True)
+        for line in ver.stdout.splitlines():
+            if line.startswith('Version:'):
+                console.print(f"[dim]Nerfstudio {line}[/dim]")
+                break
+    except Exception:
+        pass
+
+    # Log first frame convention for debugging
+    transforms_file = data_dir / "transforms.json"
+    if transforms_file.exists():
+        import json as _json
+        with open(transforms_file) as _f:
+            _tf = _json.load(_f)
+        if _tf.get('frames'):
+            _m = _tf['frames'][0]['transform_matrix']
+            _y_col = [_m[0][1], _m[1][1], _m[2][1]]
+            console.print(f"[dim]Camera Y column (frame 0): {_y_col}[/dim]")
+            console.print(f"[dim]  Y>0 = OpenGL/ARKit, Y<0 = OpenCV[/dim]")
+        console.print(f"[dim]Frames: {len(_tf.get('frames', []))}, "
+                      f"aabb_scale: {_tf.get('aabb_scale')}[/dim]")
+
+    # Build command — explicit 'nerfstudio-data' dataparser for transforms.json format
     cmd = [
-        'ns-train', 'splatfacto',
+        'ns-train', 'splatfacto', 'nerfstudio-data',
         '--data', str(data_dir),
         '--output-dir', str(output_dir),
         '--experiment-name', experiment_name,

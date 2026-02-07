@@ -12,12 +12,13 @@ from .matrix import row_major_to_matrix, validate_transform
 
 # Pydantic models for scan manifest validation
 
+
 class CameraCalibration(BaseModel):
     intrinsic_matrix: List[float] = Field(..., min_length=9, max_length=9)
     image_width: int = Field(..., gt=0)
     image_height: int = Field(..., gt=0)
 
-    @field_validator('intrinsic_matrix')
+    @field_validator("intrinsic_matrix")
     @classmethod
     def validate_intrinsics(cls, v):
         if len(v) != 9:
@@ -42,7 +43,7 @@ class PoseEntry(BaseModel):
     tracking_state: str = Field(default="normal")
     image_name: Optional[str] = None
 
-    @field_validator('transform_matrix')
+    @field_validator("transform_matrix")
     @classmethod
     def validate_transform_matrix(cls, v):
         if len(v) != 16:
@@ -52,7 +53,7 @@ class PoseEntry(BaseModel):
             raise ValueError("Invalid transformation matrix")
         return v
 
-    @field_validator('tracking_state')
+    @field_validator("tracking_state")
     @classmethod
     def validate_tracking_state(cls, v):
         valid_states = {"normal", "limited", "not_available"}
@@ -89,6 +90,7 @@ class FloorplanData(BaseModel):
 
 class ScanManifest(BaseModel):
     """Pydantic model for scan manifest validation."""
+
     scan_id: str = Field(alias="scan_id")
     timestamp: str
     scan_type: str = Field(alias="scan_type")
@@ -97,12 +99,10 @@ class ScanManifest(BaseModel):
     poses: List[PoseEntry]
     floorplan: Optional[FloorplanData] = None
     video_start_time: Optional[float] = Field(default=None, alias="video_start_time")
-    
-    model_config = {
-        "populate_by_name": True
-    }
 
-    @field_validator('poses')
+    model_config = {"populate_by_name": True}
+
+    @field_validator("poses")
     @classmethod
     def validate_poses_list(cls, v):
         if len(v) < 10:
@@ -126,7 +126,7 @@ def validate_manifest(manifest_path: Path) -> Tuple[bool, Optional[ScanManifest]
         return False, None, ["Manifest file does not exist"]
 
     try:
-        with open(manifest_path, 'r') as f:
+        with open(manifest_path, "r") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         return False, None, [f"Invalid JSON: {e}"]
@@ -154,43 +154,49 @@ def validate_video_file(video_path: Path) -> Tuple[bool, Dict, List[str]]:
 
     # Get file size
     file_size = video_path.stat().st_size
-    info['file_size'] = file_size
+    info["file_size"] = file_size
 
     if file_size < 1024:  # Less than 1KB
         errors.append("Video file too small")
 
     # Check extension
-    if video_path.suffix.lower() not in ['.mov', '.mp4', '.m4v']:
+    if video_path.suffix.lower() not in [".mov", ".mp4", ".m4v"]:
         errors.append(f"Unexpected video format: {video_path.suffix}")
 
     # Try to probe video with ffprobe (if available)
     try:
         import subprocess
+
         result = subprocess.run(
             [
-                'ffprobe', '-v', 'quiet', '-print_format', 'json',
-                '-show_streams', '-show_format', str(video_path)
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+                str(video_path),
             ],
             capture_output=True,
-            text=True
+            text=True,
         )
         if result.returncode == 0:
             probe_data = json.loads(result.stdout)
             video_stream = next(
-                (s for s in probe_data.get('streams', []) if s['codec_type'] == 'video'),
-                None
+                (s for s in probe_data.get("streams", []) if s["codec_type"] == "video"), None
             )
             if video_stream:
-                info['width'] = int(video_stream.get('width', 0))
-                info['height'] = int(video_stream.get('height', 0))
-                info['duration'] = float(probe_data.get('format', {}).get('duration', 0))
-                info['codec'] = video_stream.get('codec_name', 'unknown')
+                info["width"] = int(video_stream.get("width", 0))
+                info["height"] = int(video_stream.get("height", 0))
+                info["duration"] = float(probe_data.get("format", {}).get("duration", 0))
+                info["codec"] = video_stream.get("codec_name", "unknown")
 
                 # Get frame rate
-                fps_str = video_stream.get('r_frame_rate', '0/1')
-                if '/' in fps_str:
-                    num, den = fps_str.split('/')
-                    info['fps'] = float(num) / float(den) if float(den) != 0 else 0
+                fps_str = video_stream.get("r_frame_rate", "0/1")
+                if "/" in fps_str:
+                    num, den = fps_str.split("/")
+                    info["fps"] = float(num) / float(den) if float(den) != 0 else 0
     except (FileNotFoundError, json.JSONDecodeError):
         # ffprobe not available, skip detailed validation
         pass
@@ -213,12 +219,12 @@ def validate_poses(poses: List[PoseEntry]) -> Tuple[bool, Dict, List[str]]:
     """
     warnings = []
     stats = {
-        'total_poses': len(poses),
-        'normal_tracking': 0,
-        'limited_tracking': 0,
-        'lost_tracking': 0,
-        'duration': 0,
-        'avg_fps': 0,
+        "total_poses": len(poses),
+        "normal_tracking": 0,
+        "limited_tracking": 0,
+        "lost_tracking": 0,
+        "duration": 0,
+        "avg_fps": 0,
     }
 
     if len(poses) < 10:
@@ -226,36 +232,36 @@ def validate_poses(poses: List[PoseEntry]) -> Tuple[bool, Dict, List[str]]:
 
     # Track timestamps
     timestamps = [p.timestamp for p in poses]
-    stats['duration'] = timestamps[-1] - timestamps[0]
+    stats["duration"] = timestamps[-1] - timestamps[0]
 
-    if stats['duration'] > 0:
-        stats['avg_fps'] = len(poses) / stats['duration']
+    if stats["duration"] > 0:
+        stats["avg_fps"] = len(poses) / stats["duration"]
 
     # Check monotonicity
     for i in range(1, len(timestamps)):
-        if timestamps[i] <= timestamps[i-1]:
+        if timestamps[i] <= timestamps[i - 1]:
             warnings.append(f"Non-monotonic timestamp at index {i}")
 
     # Check for gaps
     max_gap = 0.5  # 500ms
     for i in range(1, len(timestamps)):
-        gap = timestamps[i] - timestamps[i-1]
+        gap = timestamps[i] - timestamps[i - 1]
         if gap > max_gap:
             warnings.append(f"Large timestamp gap ({gap:.2f}s) at index {i}")
 
     # Count tracking states
     for pose in poses:
         if pose.tracking_state == "normal":
-            stats['normal_tracking'] += 1
+            stats["normal_tracking"] += 1
         elif pose.tracking_state == "limited":
-            stats['limited_tracking'] += 1
+            stats["limited_tracking"] += 1
         else:
-            stats['lost_tracking'] += 1
+            stats["lost_tracking"] += 1
 
     # Check tracking quality
-    normal_ratio = stats['normal_tracking'] / len(poses)
+    normal_ratio = stats["normal_tracking"] / len(poses)
     if normal_ratio < 0.5:
-        warnings.append(f"Low tracking quality: only {normal_ratio*100:.1f}% normal tracking")
+        warnings.append(f"Low tracking quality: only {normal_ratio * 100:.1f}% normal tracking")
 
     # Check for position jumps
     prev_pos = None
@@ -265,7 +271,7 @@ def validate_poses(poses: List[PoseEntry]) -> Tuple[bool, Dict, List[str]]:
         pos = matrix[:3, 3]
 
         if prev_pos is not None and i > 0:
-            dt = timestamps[i] - timestamps[i-1]
+            dt = timestamps[i] - timestamps[i - 1]
             if dt > 0:
                 velocity = np.linalg.norm(pos - prev_pos) / dt
                 if velocity > max_velocity:
@@ -299,7 +305,7 @@ def validate_scan_package(package_dir: Path) -> Tuple[bool, Dict, List[str]]:
     if not manifest_valid:
         return False, info, manifest_errors
 
-    info['manifest'] = manifest
+    info["manifest"] = manifest
 
     # Check for images directory or video (at least one required)
     has_images = False
@@ -311,7 +317,7 @@ def validate_scan_package(package_dir: Path) -> Tuple[bool, Dict, List[str]]:
             image_files = list(images_dir.glob("frame_*.jpg"))
             if len(image_files) > 0:
                 has_images = True
-                info['images'] = {'count': len(image_files), 'dir': str(images_dir)}
+                info["images"] = {"count": len(image_files), "dir": str(images_dir)}
             else:
                 errors.append(f"Images directory exists but contains no frame_*.jpg files")
 
@@ -321,7 +327,7 @@ def validate_scan_package(package_dir: Path) -> Tuple[bool, Dict, List[str]]:
         if video_valid:
             has_video = True
         errors.extend(video_errors)
-        info['video'] = video_info
+        info["video"] = video_info
 
     if not has_images and not has_video:
         errors.append("Scan package must contain either an images directory or a video file")
@@ -330,12 +336,12 @@ def validate_scan_package(package_dir: Path) -> Tuple[bool, Dict, List[str]]:
     if manifest.assets.room_geometry:
         room_path = package_dir / manifest.assets.room_geometry
         if room_path.exists():
-            info['has_room_geometry'] = True
+            info["has_room_geometry"] = True
         # Missing room geometry is not a validation error - it's optional
 
     # Validate poses
     poses_valid, poses_stats, poses_warnings = validate_poses(manifest.poses)
-    info['poses'] = poses_stats
+    info["poses"] = poses_stats
 
     # Add warnings as errors if critical
     for warning in poses_warnings:
