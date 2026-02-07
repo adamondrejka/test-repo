@@ -19,41 +19,45 @@ console = Console()
 
 @dataclass
 class TrainingConfig:
-    """Configuration for Gaussian Splat training."""
+    """Configuration for Gaussian Splat training.
+
+    Defaults match nerfstudio 1.1.5 splatfacto where appropriate,
+    with tuned overrides for indoor real estate scanning.
+    """
     max_iterations: int = 30000
     warmup_iterations: int = 500
-    densify_until: int = 15000
-    densify_interval: int = 100
-    densify_grad_thresh: float = 0.0002
-    cull_alpha_thresh: float = 0.005
-    split_size_thresh: float = 0.01
-    position_lr_init: float = 0.00016
-    position_lr_final: float = 0.0000016
-    feature_lr: float = 0.0025
-    opacity_lr: float = 0.05
-    scaling_lr: float = 0.005
-    rotation_lr: float = 0.001
-    percent_dense: float = 0.01
-    lambda_dssim: float = 0.2
+    densify_until: int = 15000          # stop-split-at
+    densify_interval: int = 100         # refine-every
+    densify_grad_thresh: float = 0.0004 # ns default 0.0008, lower = more splats
+    cull_alpha_thresh: float = 0.005    # ns default 0.1, lower = keep more translucent
+    cull_scale_thresh: float = 0.5      # cull huge gaussians
+    split_screen_size: float = 0.05     # ns default 0.05
+    cull_screen_size: float = 0.15      # ns default 0.15
+    densify_size_thresh: float = 0.01   # below this: duplicate, above: split
+    lambda_dssim: float = 0.2           # ssim loss weight
+    sh_degree: int = 3                  # spherical harmonics degree
+    num_downscales: int = 0             # 0 = train at full resolution from start
 
     def to_nerfstudio_args(self) -> List[str]:
-        """Convert to nerfstudio CLI arguments for splatfacto."""
-        args = [
+        """Convert to nerfstudio 1.1.5 splatfacto CLI arguments."""
+        return [
             '--max-num-iterations', str(self.max_iterations),
-            # Densification control
+            # Densification
             '--pipeline.model.warmup-length', str(self.warmup_iterations),
             '--pipeline.model.refine-every', str(self.densify_interval),
             '--pipeline.model.stop-split-at', str(self.densify_until),
             '--pipeline.model.densify-grad-thresh', str(self.densify_grad_thresh),
+            '--pipeline.model.densify-size-thresh', str(self.densify_size_thresh),
+            # Culling
             '--pipeline.model.cull-alpha-thresh', str(self.cull_alpha_thresh),
-            '--pipeline.model.percent-dense', str(self.percent_dense),
-            '--pipeline.model.split-screen-size', str(self.split_size_thresh),
-            # Loss
+            '--pipeline.model.cull-scale-thresh', str(self.cull_scale_thresh),
+            '--pipeline.model.cull-screen-size', str(self.cull_screen_size),
+            '--pipeline.model.split-screen-size', str(self.split_screen_size),
+            # Quality
             '--pipeline.model.ssim-lambda', str(self.lambda_dssim),
-            # Disable downscaling — use full-res images from the start
-            '--pipeline.model.num-downscales', '0',
+            '--pipeline.model.sh-degree', str(self.sh_degree),
+            '--pipeline.model.num-downscales', str(self.num_downscales),
         ]
-        return args
 
 
 class TrainingError(Exception):
