@@ -37,11 +37,23 @@ class TrainingConfig:
     lambda_dssim: float = 0.2
 
     def to_nerfstudio_args(self) -> List[str]:
-        """Convert to nerfstudio CLI arguments."""
-        # Note: nerfstudio uses top-level --max-num-iterations, not --pipeline.model.*
-        return [
+        """Convert to nerfstudio CLI arguments for splatfacto."""
+        args = [
             '--max-num-iterations', str(self.max_iterations),
+            # Densification control
+            '--pipeline.model.warmup-length', str(self.warmup_iterations),
+            '--pipeline.model.refine-every', str(self.densify_interval),
+            '--pipeline.model.stop-split-at', str(self.densify_until),
+            '--pipeline.model.densify-grad-thresh', str(self.densify_grad_thresh),
+            '--pipeline.model.cull-alpha-thresh', str(self.cull_alpha_thresh),
+            '--pipeline.model.percent-dense', str(self.percent_dense),
+            '--pipeline.model.split-screen-size', str(self.split_size_thresh),
+            # Loss
+            '--pipeline.model.ssim-lambda', str(self.lambda_dssim),
+            # Disable downscaling — use full-res images from the start
+            '--pipeline.model.num-downscales', '0',
         ]
+        return args
 
 
 class TrainingError(Exception):

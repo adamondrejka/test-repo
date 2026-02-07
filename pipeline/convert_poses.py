@@ -5,6 +5,7 @@ Converts ARKit camera poses to Nerfstudio transforms.json format.
 """
 
 import json
+import math
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import numpy as np
@@ -234,6 +235,32 @@ def create_transforms_json(
 
     if zero_position_count > 0:
         console.print(f"[yellow]Filtered {zero_position_count} frames with zero positions[/yellow]")
+
+    # Auto-compute scene centering and aabb_scale from camera positions
+    if transforms['frames']:
+        positions = np.array([
+            np.array(f['transform_matrix'])[:3, 3]
+            for f in transforms['frames']
+        ])
+        centroid = positions.mean(axis=0)
+
+        # Center all poses around centroid
+        for frame in transforms['frames']:
+            m = np.array(frame['transform_matrix'])
+            m[:3, 3] -= centroid
+            frame['transform_matrix'] = m.tolist()
+
+        # Compute aabb_scale as smallest power-of-2 that contains the scene
+        centered_positions = positions - centroid
+        extent = centered_positions.max(axis=0) - centered_positions.min(axis=0)
+        diagonal = float(np.linalg.norm(extent))
+        # Add 50% margin so splats outside camera hull are still in bounds
+        auto_aabb = max(1, 2 ** math.ceil(math.log2(max(diagonal * 1.5, 1.0))))
+        auto_aabb = min(auto_aabb, 128)
+        transforms['aabb_scale'] = auto_aabb
+
+        console.print(f"[blue]Scene centering: centroid={centroid.round(2).tolist()}, "
+                      f"diagonal={diagonal:.2f}m, aabb_scale={auto_aabb}[/blue]")
 
     # Write to file
     with open(output_path, 'w') as f:

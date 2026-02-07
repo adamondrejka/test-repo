@@ -26,6 +26,7 @@ from .collision import (
     CollisionError,
 )
 from .package import create_tour_package, create_zip_package, PackageError
+from .quality_assessment import split_train_test_frames, evaluate_model
 
 console = Console()
 app = typer.Typer(help="Reality Engine Processing Pipeline")
@@ -184,6 +185,7 @@ def run_pipeline(
     stats.record_stage("convert_poses", time.time() - stage_start)
 
     # Stage 4: Train Gaussian Splat
+    quality_metrics = {}
     if not config.skip_training:
         console.print("\n[bold]Stage 4: Train Gaussian Splat[/bold]")
         stage_start = time.time()
@@ -192,16 +194,20 @@ def run_pipeline(
             train_data_dir = work_dir / "train_data"
             train_data_dir.mkdir(exist_ok=True)
 
-            # Copy transforms and link frames
+            # Split train/test frames (hold out every 10th for evaluation)
+            train_tf_path, test_tf_path = split_train_test_frames(
+                transforms_path, test_every=10)
+
+            # Use train set for training
             import shutil
-            shutil.copy(transforms_path, train_data_dir / "transforms.json")
+            shutil.copy(train_tf_path, train_data_dir / "transforms.json")
             frames_link = train_data_dir / "frames"
             if frames_link.exists() or frames_link.is_symlink():
                 frames_link.unlink() if frames_link.is_symlink() else shutil.rmtree(frames_link)
             frames_link.symlink_to(frames_dir.resolve())
 
             training_config = TrainingConfig(
-                max_iterations=config.training_iterations
+                max_iterations=config.training_iterations,
             )
             ply_path = train_and_export(
                 data_dir=train_data_dir,
@@ -209,11 +215,23 @@ def run_pipeline(
                 config=training_config,
                 experiment_name=scan_id
             )
+
+            # Evaluate quality against test views
+            console.print("\n[bold]Stage 4b: Quality Evaluation[/bold]")
+            model_dir = work_dir / "training" / scan_id / "splatfacto" / "latest"
+            if not model_dir.exists():
+                for p in (work_dir / "training").rglob("config.yml"):
+                    model_dir = p.parent
+                    break
+            quality_metrics = evaluate_model(
+                model_dir, test_tf_path, work_dir / "evaluation")
+
         except TrainingError as e:
             console.print(f"[bold red]Training failed:[/bold red] {e}")
             raise
         stats.record_stage("train", time.time() - stage_start,
-                          iterations=config.training_iterations)
+                          iterations=config.training_iterations,
+                          quality=quality_metrics)
     else:
         console.print("\n[bold]Stage 4: Training (SKIPPED)[/bold]")
         # Look for existing Gaussian splat PLY file (not LiDAR mesh)

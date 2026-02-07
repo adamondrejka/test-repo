@@ -10,8 +10,9 @@ import subprocess
 import shutil
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
+import cv2
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from tqdm import tqdm
@@ -30,6 +31,32 @@ DEFAULT_MIN_DISTANCE = 0.05  # 5cm
 # ARKit returns near-zero positions when tracking is unstable
 # 5cm threshold catches all "origin cluster" poses
 ZERO_POSITION_THRESHOLD = 0.05
+
+
+def compute_frame_quality(image_path: Path) -> float:
+    """
+    Compute a quality score for a frame image (0.0 to 1.0).
+
+    Combines sharpness (Laplacian variance) and exposure quality.
+    Higher is better.
+    """
+    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return 0.0
+
+    # Sharpness via Laplacian variance (higher = sharper)
+    laplacian_var = cv2.Laplacian(img, cv2.CV_64F).var()
+    # Normalize: typical range 0-1000+, use sigmoid-like mapping
+    sharpness = min(laplacian_var / 500.0, 1.0)
+
+    # Exposure: penalize very dark or very bright images
+    mean_brightness = img.mean() / 255.0
+    # Ideal brightness around 0.4-0.6, penalize extremes
+    exposure = 1.0 - 2.0 * abs(mean_brightness - 0.5)
+    exposure = max(exposure, 0.0)
+
+    # Weighted combination: sharpness matters more
+    return 0.7 * sharpness + 0.3 * exposure
 
 
 def is_valid_pose(pose: dict) -> bool:
@@ -286,6 +313,80 @@ def match_frames_to_poses(
     return matched
 
 
+def filter_outlier_poses(
+    frames: List[ExtractedFrame],
+    position_window: int = 10,
+    position_sigma: float = 2.0,
+    max_rotation_jump_deg: float = 15.0,
+) -> List[ExtractedFrame]:
+    """
+    Remove frames with outlier poses (tracking glitches).
+
+    Uses two checks:
+    1. Position smoothness: flags poses that deviate from a local moving average
+    2. Angular consistency: flags sudden rotation jumps between consecutive frames
+
+    Args:
+        frames: List of frames with poses
+        position_window: Window size for local smoothness check
+        position_sigma: Sigma threshold for position outlier detection
+        max_rotation_jump_deg: Max allowed rotation change between consecutive frames
+
+    Returns:
+        Filtered list with outliers removed
+    """
+    if len(frames) < position_window:
+        return frames
+
+    from utils.matrix import row_major_to_matrix
+
+    # Extract positions and rotations
+    positions = []
+    rotations = []
+    for frame in frames:
+        m = row_major_to_matrix(frame.transform_matrix)
+        positions.append(m[:3, 3])
+        rotations.append(m[:3, :3])
+    positions = np.array(positions)
+
+    outlier_mask = np.zeros(len(frames), dtype=bool)
+
+    # Check 1: Position smoothness via sliding window
+    half_w = position_window // 2
+    for i in range(len(frames)):
+        start = max(0, i - half_w)
+        end = min(len(frames), i + half_w + 1)
+        window_positions = positions[start:end]
+        local_mean = window_positions.mean(axis=0)
+        local_std = window_positions.std(axis=0).mean()
+        if local_std < 0.001:
+            continue
+        deviation = np.linalg.norm(positions[i] - local_mean)
+        if deviation > position_sigma * local_std * np.sqrt(end - start):
+            outlier_mask[i] = True
+
+    # Check 2: Angular consistency between consecutive frames
+    for i in range(1, len(frames)):
+        if outlier_mask[i]:
+            continue
+        # Relative rotation between consecutive frames
+        R_rel = rotations[i] @ rotations[i - 1].T
+        # Rotation angle from trace: angle = arccos((trace(R)-1)/2)
+        trace_val = np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)
+        angle_deg = np.degrees(np.arccos(trace_val))
+        if angle_deg > max_rotation_jump_deg:
+            outlier_mask[i] = True
+
+    outlier_count = outlier_mask.sum()
+    if outlier_count > 0:
+        console.print(f"[yellow]Filtered {outlier_count} outlier poses "
+                      f"(tracking glitches)[/yellow]")
+    else:
+        console.print(f"[dim]Pose outlier check: all {len(frames)} poses OK[/dim]")
+
+    return [f for f, is_outlier in zip(frames, outlier_mask) if not is_outlier]
+
+
 def filter_by_tracking_quality(
     frames: List[ExtractedFrame],
     include_limited: bool = True,
@@ -323,12 +424,10 @@ def downsample_frames(
     use_movement_based: bool = True
 ) -> List[ExtractedFrame]:
     """
-    Downsample frames for training using smart selection.
+    Downsample frames for training using quality-weighted movement-based selection.
 
-    Selection strategy (in order of priority):
-    1. If target_count specified: select frames with maximum coverage
-    2. If min_distance specified: ensure minimum camera movement between frames
-    3. If use_movement_based: distribute frames based on camera path length
+    For each path segment, picks the highest-quality frame among candidates
+    (sharpness + exposure scoring).
 
     Args:
         frames: List of frames to downsample
@@ -358,52 +457,76 @@ def downsample_frames(
         positions.append(extract_position(matrix))
     positions = np.array(positions)
 
+    # Pre-compute quality scores for all frames
+    console.print(f"[blue]Computing frame quality scores...[/blue]")
+    quality_scores = np.array([
+        compute_frame_quality(frame.image_path) for frame in frames
+    ])
+    mean_q = quality_scores.mean()
+    console.print(f"[dim]Quality scores: mean={mean_q:.3f}, "
+                  f"min={quality_scores.min():.3f}, max={quality_scores.max():.3f}[/dim]")
+
     if target_count and use_movement_based:
-        # Movement-based selection: select frames distributed along camera path
-        # Calculate cumulative distance along path
+        # Movement-based selection with quality tiebreaking
         distances = [0.0]
         for i in range(1, len(positions)):
             dist = np.linalg.norm(positions[i] - positions[i-1])
             distances.append(distances[-1] + dist)
 
         total_distance = distances[-1]
-        if total_distance < 0.01:  # Camera didn't move much
-            # Fall back to uniform temporal sampling
+        if total_distance < 0.01:
+            # Fall back to uniform temporal sampling, prefer quality
             indices = np.linspace(0, len(frames) - 1, target_count, dtype=int)
             return [frames[i] for i in indices]
 
-        # Select frames at uniform distances along path
+        distances_arr = np.array(distances)
+        # Assign each frame to the nearest path segment
         target_distances = np.linspace(0, total_distance, target_count)
+        segment_half_width = (total_distance / target_count) / 2.0
+
         selected_indices = []
+        used = set()
 
         for target_dist in target_distances:
-            # Find frame closest to this distance along path
-            idx = np.argmin(np.abs(np.array(distances) - target_dist))
-            if idx not in selected_indices:
-                selected_indices.append(idx)
+            # Find all candidate frames within this segment
+            candidates = np.where(
+                np.abs(distances_arr - target_dist) <= segment_half_width
+            )[0]
+            candidates = [c for c in candidates if c not in used]
+
+            if candidates:
+                # Pick the one with highest quality score
+                best = max(candidates, key=lambda c: quality_scores[c])
+                selected_indices.append(best)
+                used.add(best)
             else:
-                # Find nearest unselected frame
-                for offset in range(1, len(frames)):
-                    for candidate in [idx + offset, idx - offset]:
-                        if 0 <= candidate < len(frames) and candidate not in selected_indices:
-                            selected_indices.append(candidate)
-                            break
-                    else:
-                        continue
-                    break
+                # Fallback: nearest unselected frame
+                idx = np.argmin(np.abs(distances_arr - target_dist))
+                if idx not in used:
+                    selected_indices.append(idx)
+                    used.add(idx)
+                else:
+                    for offset in range(1, len(frames)):
+                        for candidate in [idx + offset, idx - offset]:
+                            if 0 <= candidate < len(frames) and candidate not in used:
+                                selected_indices.append(candidate)
+                                used.add(candidate)
+                                break
+                        else:
+                            continue
+                        break
 
         selected_indices = sorted(set(selected_indices))
-        console.print(f"[blue]Movement-based selection: {len(selected_indices)} frames "
-                     f"covering {total_distance:.2f}m path[/blue]")
+        selected_quality = quality_scores[selected_indices].mean()
+        console.print(f"[blue]Quality-weighted selection: {len(selected_indices)} frames "
+                      f"covering {total_distance:.2f}m, avg quality={selected_quality:.3f}[/blue]")
         return [frames[i] for i in selected_indices]
 
     if target_count:
-        # Uniform temporal sampling (fallback)
         indices = np.linspace(0, len(frames) - 1, target_count, dtype=int)
         return [frames[i] for i in indices]
 
     if min_distance:
-        # Distance-based sampling - select frame when camera moves enough
         selected = [frames[0]]
         last_pos = positions[0]
 
@@ -413,7 +536,6 @@ def downsample_frames(
                 selected.append(frame)
                 last_pos = positions[i]
 
-        # Always include last frame for full coverage
         if selected[-1] != frames[-1]:
             selected.append(frames[-1])
 
@@ -551,18 +673,21 @@ def load_captured_images(
         # Update image_path to point to copied location
         f.image_path = dest
 
-    # 4. Downsample using existing movement-based algorithm
+    # 4. Filter outlier poses before downsampling
+    frames = filter_outlier_poses(frames)
+
+    # 5. Downsample using quality-weighted movement-based algorithm
     original_count = len(frames)
     if target_frame_count and len(frames) > target_frame_count:
         frames = downsample_frames(frames, target_count=target_frame_count)
         console.print(f"[green]Selected {len(frames)}/{original_count} frames "
                      f"(target: {target_frame_count})[/green]")
 
-    # 5. Cleanup non-selected frames
+    # 6. Cleanup non-selected frames
     if len(frames) < original_count:
         cleanup_unused_frames(frames_dir, frames)
 
-    # 6. Write frames_manifest.json
+    # 7. Write frames_manifest.json
     save_frame_manifest(frames, output_dir / "frames_manifest.json")
 
     return frames_dir, frames
@@ -628,6 +753,9 @@ def extract_frames(
         video_start_time=video_start_time or 0.0,
         include_limited=include_limited_tracking
     )
+
+    # Filter outlier poses
+    matched = filter_outlier_poses(matched)
 
     # Smart downsampling (enabled by default)
     original_count = len(matched)
