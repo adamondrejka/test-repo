@@ -279,9 +279,10 @@ def train_gaussian_splat(
     cmd.extend(['nerfstudio-data', '--data', str(data_dir)])
 
     # Depth supervision (if depth maps available and flag set)
+    # Note: after 'nerfstudio-data' subcommand, use short-form dataparser args
     if use_depth:
         cmd.extend([
-            '--pipeline.datamanager.dataparser.depth-unit-scale-factor', '0.001',
+            '--depth-unit-scale-factor', '0.001',
         ])
         console.print(f"[blue]Depth supervision enabled (LiDAR depth maps)[/blue]")
 
