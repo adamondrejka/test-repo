@@ -53,7 +53,6 @@ class PipelineConfig:
     # Corrections
     rotate_180: bool = False
     transpose: Optional[int] = None
-    skip_pose_conversion: bool = False
 
     # Output
     create_zip: bool = True
@@ -178,7 +177,6 @@ def run_pipeline(
             frames_manifest_path=work_dir / "extracted" / "frames_manifest.json",
             rotate_180=config.rotate_180,
             transpose=config.transpose,
-            skip_conversion=config.skip_pose_conversion
         )
     except ConversionError as e:
         console.print(f"[bold red]Pose conversion failed:[/bold red] {e}")
@@ -359,7 +357,6 @@ def main(
     target_frames: int = typer.Option(250, help="Target number of frames (default: 250, use 0 for no limit)"),
     rotate_180: bool = typer.Option(False, "--rotate-180", help="Rotate cameras 180 degrees (fix for upside down scenes)"),
     transpose: Optional[int] = typer.Option(None, help="FFmpeg transpose: 1=90CW, 2=90CCW"),
-    skip_pose_conversion: bool = typer.Option(False, "--skip-pose-conversion", help="Skip ARKit→OpenCV pose conversion (use raw ARKit poses)"),
     no_zip: bool = typer.Option(False, "--no-zip", help="Don't create ZIP archive"),
     compression: str = typer.Option("high", help="Compression quality: low, medium, high"),
 ):
@@ -380,7 +377,6 @@ def main(
         compression_quality=compression,
         rotate_180=rotate_180,
         transpose=transpose,
-        skip_pose_conversion=skip_pose_conversion,
     )
 
     try:

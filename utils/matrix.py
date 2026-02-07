@@ -62,23 +62,18 @@ def extract_rotation(matrix: np.ndarray) -> np.ndarray:
 
 def arkit_to_nerfstudio(matrix: np.ndarray) -> np.ndarray:
     """
-    Convert ARKit camera transform to Nerfstudio convention.
+    DEPRECATED: Not used in the default pipeline.
 
-    ARKit uses:
-    - Right-handed coordinate system
-    - Y-up
-    - Camera looks along -Z axis
-    - Transform is camera-to-world
+    Converts ARKit (OpenGL) convention to OpenCV convention by negating
+    Y and Z columns (180-degree rotation around X axis). This was
+    previously used based on the incorrect assumption that Nerfstudio
+    expects OpenCV-convention poses. In fact, Nerfstudio expects
+    OpenGL-convention poses (same as ARKit), so no conversion is needed.
 
-    Nerfstudio (using OPENCV camera model) uses:
-    - Right-handed coordinate system
-    - Y-down
-    - Camera looks along +Z axis
-    - Transform is camera-to-world
+    The "OPENCV" camera_model in transforms.json only controls the lens
+    distortion model, not the pose convention.
 
-    To convert from ARKit (Y-up, -Z) to OpenCV (Y-down, +Z), we need to
-    rotate 180 degrees around the X axis. This corresponds to negating
-    both the Y and Z axes (columns 1 and 2).
+    Kept for potential future use with tools that actually need OpenCV poses.
     """
     # Create a copy to avoid modifying the original
     result = matrix.copy()

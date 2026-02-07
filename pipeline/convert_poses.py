@@ -13,7 +13,6 @@ from PIL import Image
 
 from utils.matrix import (
     row_major_to_matrix,
-    arkit_to_nerfstudio,
     compute_camera_intrinsics_dict,
     validate_transform,
 )
@@ -71,10 +70,12 @@ def create_nerfstudio_frame(
     timestamp: Optional[float] = None,
     rotate_180: bool = False,
     transpose: Optional[int] = None,
-    skip_conversion: bool = False
 ) -> Dict:
     """
     Create a single frame entry for Nerfstudio transforms.json.
+
+    ARKit and Nerfstudio both use OpenGL convention (Y-up, camera looks -Z),
+    so no coordinate conversion is needed.
 
     Args:
         image_path: Relative path to image file
@@ -93,11 +94,8 @@ def create_nerfstudio_frame(
     if not validate_transform(matrix):
         raise ConversionError(f"Invalid transform matrix for {image_path}")
 
-    # Convert to Nerfstudio convention (unless skipped for testing)
-    if skip_conversion:
-        ns_matrix = matrix.copy()
-    else:
-        ns_matrix = arkit_to_nerfstudio(matrix)
+    # ARKit and Nerfstudio both use OpenGL convention — no conversion needed
+    ns_matrix = matrix.copy()
 
     if rotate_180:
         # Rotate 180 degrees around Z axis (negate X and Y)
@@ -142,7 +140,6 @@ def create_transforms_json(
     camera_model: str = "OPENCV",
     rotate_180: bool = False,
     transpose: Optional[int] = None,
-    skip_conversion: bool = False
 ) -> Dict:
     """
     Create Nerfstudio-compatible transforms.json.
@@ -213,8 +210,6 @@ def create_transforms_json(
 
     # Convert each frame
     console.print(f"[blue]Converting {len(frames)} poses to Nerfstudio format...[/blue]")
-    if skip_conversion:
-        console.print(f"[yellow]Skipping ARKit→OpenCV conversion (raw ARKit poses)[/yellow]")
     if rotate_180:
         console.print(f"[yellow]Applying 180-degree rotation fix[/yellow]")
 
@@ -231,7 +226,6 @@ def create_transforms_json(
                 timestamp=frame_data.get('timestamp'),
                 rotate_180=rotate_180,
                 transpose=transpose,
-                skip_conversion=skip_conversion
             )
             transforms['frames'].append(frame)
         except ConversionError as e:
@@ -257,7 +251,6 @@ def convert_from_manifest(
     frames_manifest_path: Optional[Path] = None,
     rotate_180: bool = False,
     transpose: Optional[int] = None,
-    skip_conversion: bool = False
 ) -> Dict:
     """
     Convert poses from iOS scan manifest to Nerfstudio format.
@@ -318,7 +311,6 @@ def convert_from_manifest(
         frames_dir=frames_dir,
         rotate_180=rotate_180,
         transpose=transpose,
-        skip_conversion=skip_conversion
     )
 
 
