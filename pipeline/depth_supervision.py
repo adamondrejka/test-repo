@@ -77,11 +77,18 @@ def generate_depth_maps(
             downsample=4,  # Render at 1/4 res for speed, nerfstudio upsamples
         )
 
-        if depth_map is not None:
-            depth_name = frame_name.replace('frame_', 'depth_') + '.png'
-            depth_path = output_dir / depth_name
-            _save_depth_png(depth_map, depth_path)
-            count += 1
+        # Always save a depth map for every frame — nerfstudio requires
+        # depth_file_path on ALL frames or NONE. Zero-depth pixels are
+        # masked out by depth-splatfacto's `valid = gt_depth > 0` check.
+        if depth_map is None:
+            ds_w = image_width // 4
+            ds_h = image_height // 4
+            depth_map = np.zeros((ds_h, ds_w), dtype=np.float32)
+
+        depth_name = frame_name.replace('frame_', 'depth_') + '.png'
+        depth_path = output_dir / depth_name
+        _save_depth_png(depth_map, depth_path)
+        count += 1
 
         if (i + 1) % 50 == 0:
             console.print(f"[dim]  Generated {i + 1}/{len(transforms['frames'])} depth maps[/dim]")
