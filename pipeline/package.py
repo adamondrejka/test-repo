@@ -183,6 +183,7 @@ def create_tour_package(
     output_dir: Path,
     processing_stats: Optional[Dict] = None,
     lod_levels: Optional[List[Dict]] = None,
+    ply_path: Optional[Path] = None,
 ) -> Path:
     """
     Create a complete tour package.
@@ -222,16 +223,30 @@ def create_tour_package(
     shutil.copy(splat_path, package_dir / splat_output_name)
     console.print(f"  Copied {splat_output_name}")
 
-    # Copy LOD files if available
+    # Always include PLY alongside SPZ for safety
+    if ply_path and ply_path.exists() and ply_path != splat_path:
+        ply_output_name = f"scene{ply_path.suffix.lower()}"
+        if ply_output_name != splat_output_name:
+            shutil.copy(ply_path, package_dir / ply_output_name)
+            console.print(f"  Copied {ply_output_name}")
+
+    # Copy LOD files if available (both PLY and SPZ)
     if lod_levels:
         lod_source_dir = splat_path.parent / "lod"
         for lod in lod_levels:
-            # Prefer SPZ, fall back to PLY
-            lod_file = lod.get("file_spz", lod["file"])
-            lod_src = lod_source_dir / lod_file
-            if lod_src.exists():
-                shutil.copy(lod_src, package_dir / lod_file)
-                console.print(f"  Copied {lod_file}")
+            # Always copy PLY
+            ply_file = lod["file"]
+            ply_src = lod_source_dir / ply_file
+            if ply_src.exists():
+                shutil.copy(ply_src, package_dir / ply_file)
+                console.print(f"  Copied {ply_file}")
+            # Also copy SPZ if available
+            if "file_spz" in lod:
+                spz_file = lod["file_spz"]
+                spz_src = lod_source_dir / spz_file
+                if spz_src.exists():
+                    shutil.copy(spz_src, package_dir / spz_file)
+                    console.print(f"  Copied {spz_file}")
 
     # Copy collision mesh if available
     if collision_path and collision_path.exists():

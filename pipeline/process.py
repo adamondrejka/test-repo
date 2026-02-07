@@ -478,6 +478,7 @@ def run_pipeline(
             scan_id=scan_id,
             scan_manifest=json.loads(manifest.model_dump_json()),
             splat_path=splat_path,
+            ply_path=ply_path,
             collision_path=collision_path,
             floorplan_path=floorplan_path,
             frames_dir=frames_dir,
